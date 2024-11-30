@@ -118,6 +118,9 @@ final class MockConnectionDelegate: ConnectionDelegate {
     
     nonisolated(unsafe) var servers = [ServerLocation]()
     nonisolated(unsafe) let listenerDelegation: ListenerDelegation
+    nonisolated(unsafe) var networkEventTask: Task<Void, Never>?
+    nonisolated(unsafe) var inactiveTask: Task<Void, Never>?
+    nonisolated(unsafe) var errorTask: Task<Void, Never>?
     let manager: ConnectionManager
     
     init(manager: ConnectionManager, listenerDelegation: ListenerDelegation) {
@@ -137,9 +140,7 @@ final class MockConnectionDelegate: ConnectionDelegate {
             }
         }
     }
-    nonisolated(unsafe) var networkEventTask: Task<Void, Never>?
-    nonisolated(unsafe) var inactiveTask: Task<Void, Never>?
-    nonisolated(unsafe) var errorTask: Task<Void, Never>?
+
     func handleNetworkEvents(_ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NetworkEvent>) {
         networkEventTask = Task {
             for await event in stream.cancelOnGracefulShutdown() {
