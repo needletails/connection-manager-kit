@@ -32,11 +32,16 @@ public struct Configuration: Sendable {
     }
 }
 
+protocol ListenerDelegate: AnyObject {
+    func didBindServer(channel: NIOAsyncChannel<NIOAsyncChannel<ByteBuffer, ByteBuffer>, Never>) async
+}
+
 actor ConnectionListener {
     
     
-    private var serviceGroup: ServiceGroup?
+    public var serviceGroup: ServiceGroup?
     public nonisolated(unsafe) var delegate: ConnectionDelegate?
+    public nonisolated(unsafe) var listenerDelegate: ListenerDelegate?
     
     public func resolveAddress(_ configuration: Configuration) throws -> Configuration {
         var configuration = configuration
@@ -65,12 +70,16 @@ actor ConnectionListener {
     public func listen(
         address: SocketAddress,
         configuration: Configuration,
-        delegate: ConnectionDelegate?
+        delegate: ConnectionDelegate?,
+        listenerDelegate: ListenerDelegate?
     ) async throws {
         self.delegate = delegate
+        self.listenerDelegate = listenerDelegate
         let serverChannel = try await bindServer(
             address: address,
             configuration: configuration)
+        await self.listenerDelegate?.didBindServer(channel: serverChannel)
+        
         let serverService = ServerChildChannelService<ByteBuffer, ByteBuffer>(serverChannel: serverChannel, delegate: self)
         serviceGroup = ServiceGroup(
             services: [serverService],
@@ -184,7 +193,7 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
             try await inboundChannelCompletion()
             // Create a group for the child channel
             try await withThrowingDiscardingTaskGroup { group in
-                for try await childChannel in inbound {
+                for try await childChannel in inbound.cancelOnGracefulShutdown() {
                     // For each new client that connects to the server, create a new group for that handler
                     group.addTask {
                         try await childChannelCompletion(childChannel)
@@ -201,7 +210,7 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
         try await serverChannel.executeThenClose { inbound in
             // Create a group for the child channel
             try await withThrowingDiscardingTaskGroup { group in
-                for try await childChannel in inbound {
+                for try await childChannel in inbound.cancelOnGracefulShutdown() {
                     // For each new client that connects to the server, create a new group for that handler
                     group.addTask {
                         try await childChannelCompletion(childChannel)
@@ -223,14 +232,14 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
                     
                     outboundContinuation.onTermination = { status in
 #if DEBUG
-                        print("Writer Stream Terminated with status: \(status)")
+                        print("Server Writer Stream Terminated with status: \(status)")
 #endif
                     }
                     
                     let (_inbound, inboundContinuation) = AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.makeStream()
                     inboundContinuation.onTermination = { status in
 #if DEBUG
-                        print("Inbound Stream Terminated with status: \(status)")
+                        print("Server Inbound Stream Terminated with status: \(status)")
 #endif
                         outboundContinuation.finish()
                     }

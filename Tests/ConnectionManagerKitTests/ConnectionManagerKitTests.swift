@@ -7,24 +7,56 @@ import Network
 #endif
 @testable import ConnectionManagerKit
 
+final class ListenerDelegation: ListenerDelegate {
+    
+    let shouldShutdown: Bool
+    var serverChannel: NIOCore.NIOAsyncChannel<NIOCore.NIOAsyncChannel<NIOCore.ByteBuffer, NIOCore.ByteBuffer>, Never>?
+    
+    init(shouldShutdown: Bool) {
+        self.shouldShutdown = shouldShutdown
+    }
+    
+    func didBindServer(channel: NIOCore.NIOAsyncChannel<NIOCore.NIOAsyncChannel<NIOCore.ByteBuffer, NIOCore.ByteBuffer>, Never>) async {
+        serverChannel = channel
+        if shouldShutdown {
+            try! await channel.executeThenClose({ _, _ in } )
+        }
+    }
+}
 
 struct ConnectionManagerKitTests {
     
     let listener = ConnectionListener()
     let manager = ConnectionManager()
+    let serverGroup = MultiThreadedEventLoopGroup.singleton
     
-    func createServer() async throws {
-        let serverConformer = MockConnectionDelegate(manager: manager)
-        let config = try await listener.resolveAddress(.init(group: MultiThreadedEventLoopGroup.singleton, host: "localhost", port: 6667))
-        try await listener.listen(address: config.address!, configuration: config, delegate: serverConformer)
+    @Test func testServerBinding() async throws {
+        await #expect(throws: Never.self, performing: {
+            let listenerDelegation = ListenerDelegation(shouldShutdown: true)
+            let serverConformer = MockConnectionDelegate(manager: manager, listenerDelegation: listenerDelegation)
+            let config = try await listener.resolveAddress(.init(group: serverGroup, host: "localhost", port: 6668))
+            try await listener.listen(
+                address: config.address!,
+                configuration: config,
+                delegate: serverConformer,
+                listenerDelegate: listenerDelegation)
+            await listener.serviceGroup?.triggerGracefulShutdown()
+        })
     }
-    
     
     @Test func testCreateConnection () async throws {
         let endpoint = "localhost"
-        let conformer = MockConnectionDelegate(manager: manager)
-        Task {
-            try await createServer()
+        let conformer = MockConnectionDelegate(manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
+        let serverTask = Task {
+            let listenerDelegation = ListenerDelegation(shouldShutdown: false)
+            let serverConformer = MockConnectionDelegate(manager: manager, listenerDelegation: listenerDelegation)
+            let config = try await listener.resolveAddress(.init(group: serverGroup, host: "localhost", port: 6667))
+            try await listener.listen(
+                address: config.address!,
+                configuration: config,
+                delegate: serverConformer,
+                listenerDelegate: listenerDelegation)
+            await listener.serviceGroup?.triggerGracefulShutdown()
         }
         
         let servers = [
@@ -36,6 +68,7 @@ struct ConnectionManagerKitTests {
         
         conformer.servers.append(contentsOf: servers)
         try await manager.connect(to: servers, delegate: conformer)
+        serverTask.cancel()
     }
     
     @Test func testCreateCachedConnections() async {
@@ -84,10 +117,12 @@ struct ConnectionManagerKitTests {
 final class MockConnectionDelegate: ConnectionDelegate {
     
     nonisolated(unsafe) var servers = [ServerLocation]()
+    nonisolated(unsafe) let listenerDelegation: ListenerDelegation
     let manager: ConnectionManager
     
-    init(manager: ConnectionManager) {
+    init(manager: ConnectionManager, listenerDelegation: ListenerDelegation) {
         self.manager = manager
+        self.listenerDelegation = listenerDelegation
     }
     
     func configureChildChannel() async {}
@@ -96,15 +131,17 @@ final class MockConnectionDelegate: ConnectionDelegate {
     
 #if canImport(Network)
     func handleError(_ stream: AsyncStream<NWError>) {
-        Task {
+        errorTask = Task {
             for await error in stream.cancelOnGracefulShutdown() {
                 print("RECEIVED ERROR", error)
             }
         }
     }
-
+    nonisolated(unsafe) var networkEventTask: Task<Void, Never>?
+    nonisolated(unsafe) var inactiveTask: Task<Void, Never>?
+    nonisolated(unsafe) var errorTask: Task<Void, Never>?
     func handleNetworkEvents(_ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NetworkEvent>) {
-        Task {
+        networkEventTask = Task {
             for await event in stream.cancelOnGracefulShutdown() {
                 switch event {
                 case .betterPathAvailable(_):
@@ -113,7 +150,10 @@ final class MockConnectionDelegate: ConnectionDelegate {
                     break
                 case .viabilityChanged(let state):
                     if state.isViable, !servers.isEmpty {
+                        var _servers = 0
+                        
                         for server in servers {
+                            _servers += 1
                             let fc1 = await manager.connectionCache.findConnection(cacheKey: server.cacheKey)
                             await #expect(fc1?.config.host == server.host)
                             try! await Task.sleep(until: .now + .seconds(5))
@@ -135,7 +175,7 @@ final class MockConnectionDelegate: ConnectionDelegate {
         }
     }
     
-#else 
+#else
     func handleError(_ stream: AsyncStream<IOError>) {
         Task {
             for await error in stream {
@@ -143,50 +183,48 @@ final class MockConnectionDelegate: ConnectionDelegate {
             }
         }
     }
-
+    
     func handleNetworkEvents(_ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NIOEvent>) {
         Task {
             for await event in stream.cancelOnGracefulShutdown() {
                 switch event {
-                    default:
+                default:
                     print("RECEVIED", event)
                 }
             }
         }
     }
-
+    
 #endif
-
+    
     func channelActive(_ stream: AsyncStream<Void>) {
 #if !canImport(Network)
-         Task {
+        Task {
             for await _ in stream.cancelOnGracefulShutdown() {
-                 if !servers.isEmpty {
-                       try! await Task.sleep(until: .now + .seconds(5))
-                        for server in servers {
-                            print(server)
-                            let fc1 = await manager.connectionCache.findConnection(cacheKey: server.cacheKey)
-                            await #expect(fc1?.config.host == server.host)
-                            await manager.shutdown(cacheKey: server.cacheKey)
-                        }
+                if !servers.isEmpty {
+                    try! await Task.sleep(until: .now + .seconds(5))
+                    for server in servers {
+                        print(server)
+                        let fc1 = await manager.connectionCache.findConnection(cacheKey: server.cacheKey)
+                        await #expect(fc1?.config.host == server.host)
+                        await manager.shutdown(cacheKey: server.cacheKey)
                     }
+                }
             }
         }
 #endif
     }
-
+    
     func channelInActive(_ stream: AsyncStream<Void>) {
-#if !canImport(Network)        
-         Task {
+        inactiveTask = Task {
             for await _ in stream.cancelOnGracefulShutdown() {
-                print("RECEIVED CHANNEL INACTIVE")
+                await tearDown()
             }
         }
-#endif
     }
-
+    
     func reportChildChannel(error: any Error) async {
-        print("REPORTED CHILD CHANNEL ERROR")
+
     }
     
     func deliverWriter<Outbound>(writer: NIOCore.NIOAsyncChannelOutboundWriter<Outbound>) async where Outbound : Sendable {}
@@ -194,5 +232,12 @@ final class MockConnectionDelegate: ConnectionDelegate {
     func deliverInboundBuffer<Inbound>(inbound: Inbound) async where Inbound : Sendable {}
     
     
+    private func tearDown() async {
+        if await manager.connectionCache.isEmpty {
+            networkEventTask?.cancel()
+            errorTask?.cancel()
+            inactiveTask?.cancel()
+        }
+    }
     
 }
