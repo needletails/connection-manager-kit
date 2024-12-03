@@ -4,33 +4,22 @@
 //
 //  Created by Cole M on 11/27/24.
 //
+import Foundation
 import NIOCore
 #if canImport(Network)
 import Network
 #endif
 import ServiceLifecycle
 
-protocol ChildChannelServiceDelelgate: Sendable {
-    func configureChildChannel() async
-    func shutdownChildConfiguration() async
-    func reportChildChannel(error: Error) async
-    func deliverWriter<Outbound: Sendable>(writer: NIOAsyncChannelOutboundWriter<Outbound>) async
-    func deliverInboundBuffer<Inbound: Sendable>(inbound: Inbound) async
-}
-
-extension ChildChannelServiceDelelgate {
-    func configureChildChannel() async {}
-    func shutdownChildConfiguration() async {}
-}
-
 actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service {
     
     let config: ServerLocation
     let childChannel: NIOAsyncChannel<Inbound, Outbound>?
     let delegate: ChildChannelServiceDelelgate
+    private var connectionDelegate: ConnectionDelegate?
+    private var contextDelegate: ChannelContextDelegate?
     var continuation: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation?
     var inboundContinuation: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation?
-    
     
     init(
         config: ServerLocation,
@@ -40,6 +29,8 @@ actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service {
         self.config = config
         self.childChannel = childChannel
         self.delegate = delegate
+        self.connectionDelegate = config.delegate
+        self.contextDelegate = config.contextDelegate
     }
     
     func run() async throws {
@@ -50,8 +41,16 @@ actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service {
         guard let childChannel = childChannel else { return }
         try await withThrowingDiscardingTaskGroup { group in
             try await childChannel.executeThenClose { [weak self] inbound, outbound in
-
                 guard let self else { return }
+                
+                let channelId = config.cacheKey
+                let channelContext = ChannelContext<Inbound, Outbound>(
+                    id: channelId,
+                    channel: childChannel
+                )
+                
+                await delegate.initializedChildChannel(channelContext)
+                
                 let (_inbound, _outbound) = await setUpStreams(
                     inbound: inbound,
                     outbound: outbound
@@ -59,18 +58,26 @@ actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service {
                 
                 group.addTask { [weak self] in
                     guard let self else { return }
-                    try await self.handleOutbound(
-                        childChannel: childChannel,
-                        _outbound: _outbound
-                    )
+                    for await writer in _outbound {
+                        let writerContext = WriterContext(
+                            id: channelId,
+                            channel: childChannel,
+                            writer: writer)
+                        await contextDelegate?.deliverWriter(context: writerContext)
+                    }
                 }
-
+                
                 for await stream in _inbound {
                     //We need to make sure that the sequence is canceled when we finish the stream
                     for try await inbound in stream.cancelOnGracefulShutdown() {
                         group.addTask { [weak self] in
                             guard let self else { return }
-                            await delegate.deliverInboundBuffer(inbound: inbound)
+                            let streamContext = StreamContext<Inbound, Outbound>(
+                                id: channelId,
+                                channel: childChannel,
+                                inbound: inbound
+                            )
+                            await contextDelegate?.deliverInboundBuffer(context: streamContext)
                         }
                     }
                 }
@@ -105,15 +112,6 @@ actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service {
             }
         }
         return (_inbound, _outbound)
-    }
-    
-    private func handleOutbound(
-        childChannel: NIOAsyncChannel<Inbound, Outbound>,
-        _outbound: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>
-    ) async throws {
-        for await writer in _outbound {
-            await delegate.deliverWriter(writer: writer)
-        }
     }
     
     func shutdown() async throws {

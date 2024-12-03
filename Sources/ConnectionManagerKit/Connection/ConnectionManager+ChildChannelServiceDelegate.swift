@@ -8,17 +8,8 @@
 import NIOCore
 
 extension ConnectionManager: ChildChannelServiceDelelgate {
-    func reportChildChannel(error: any Error) async {
-        await delegate?.reportChildChannel(error: error)
+    func initializedChildChannel<Outbound, Inbound>(_ context: ChannelContext<Inbound, Outbound>) async where Outbound : Sendable, Inbound : Sendable {
+        let foundConnection = try await connectionCache.findConnection(cacheKey: context.id)
+        await foundConnection?.config.delegate.initializedChildChannel(context)
     }
-    
-    func deliverWriter<Outbound>(writer: NIOCore.NIOAsyncChannelOutboundWriter<Outbound>) async where Outbound : Sendable {
-        await delegate?.deliverWriter(writer: writer)
-    }
-    
-    func deliverInboundBuffer<Inbound>(inbound: Inbound) async where Inbound : Sendable {
-        await delegate?.deliverInboundBuffer(inbound: inbound)
-    }
-    
-    
 }

@@ -60,25 +60,25 @@ struct ConnectionManagerKitTests {
         }
         
         let servers = [
-            ServerLocation(host: endpoint, port: 6667, enableTLS: false, cacheKey: "s1"),
-            ServerLocation(host: endpoint, port: 6667, enableTLS: false, cacheKey: "s2"),
-            ServerLocation(host: endpoint, port: 6667, enableTLS: false, cacheKey: "s3"),
-            ServerLocation(host: endpoint, port: 6667, enableTLS: false, cacheKey: "s4"),
+            ServerLocation(host: endpoint, port: 6667, enableTLS: false, cacheKey: "s1", delegate: conformer, contextDelegate: MockChannelContextDelegate()),
+            ServerLocation(host: endpoint, port: 6667, enableTLS: false, cacheKey: "s2", delegate: conformer, contextDelegate: MockChannelContextDelegate()),
+            ServerLocation(host: endpoint, port: 6667, enableTLS: false, cacheKey: "s3", delegate: conformer, contextDelegate: MockChannelContextDelegate()),
+            ServerLocation(host: endpoint, port: 6667, enableTLS: false, cacheKey: "s4", delegate: conformer, contextDelegate: MockChannelContextDelegate())
         ]
         
         conformer.servers.append(contentsOf: servers)
-        try await manager.connect(to: servers, delegate: conformer)
+        try await manager.connect(to: servers)
         serverTask.cancel()
     }
     
     @Test func testCreateCachedConnections() async {
-        
-        let c1 = ChildChannelService<ByteBuffer, ByteBuffer>(config: .init(host: "l1", port: 0, enableTLS: false, cacheKey: "s1"), childChannel: nil, delegate: manager)
-        let c2 = ChildChannelService<ByteBuffer, ByteBuffer>(config: .init(host: "l2", port: 1, enableTLS: false, cacheKey: "s2"), childChannel: nil, delegate: manager)
-        let c3 = ChildChannelService<ByteBuffer, ByteBuffer>(config: .init(host: "l3", port: 2, enableTLS: false, cacheKey: "s3"), childChannel: nil, delegate: manager)
-        let c4 = ChildChannelService<ByteBuffer, ByteBuffer>(config: .init(host: "l4", port: 3, enableTLS: false, cacheKey: "s4"), childChannel: nil, delegate: manager)
-        let c5 = ChildChannelService<ByteBuffer, ByteBuffer>(config: .init(host: "l5", port: 4, enableTLS: false, cacheKey: "s5"), childChannel: nil, delegate: manager)
-        let c6 = ChildChannelService<ByteBuffer, ByteBuffer>(config: .init(host: "l6", port: 5, enableTLS: false, cacheKey: "s6"), childChannel: nil, delegate: manager)
+        let conformer = MockConnectionDelegate(manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
+        let c1 = ChildChannelService<ByteBuffer, ByteBuffer>(config: .init(host: "l1", port: 0, enableTLS: false, cacheKey: "s1", delegate: conformer, contextDelegate: MockChannelContextDelegate()), childChannel: nil, delegate: manager)
+        let c2 = ChildChannelService<ByteBuffer, ByteBuffer>(config: .init(host: "l2", port: 1, enableTLS: false, cacheKey: "s2", delegate: conformer, contextDelegate: MockChannelContextDelegate()), childChannel: nil, delegate: manager)
+        let c3 = ChildChannelService<ByteBuffer, ByteBuffer>(config: .init(host: "l3", port: 2, enableTLS: false, cacheKey: "s3", delegate: conformer, contextDelegate: MockChannelContextDelegate()), childChannel: nil, delegate: manager)
+        let c4 = ChildChannelService<ByteBuffer, ByteBuffer>(config: .init(host: "l4", port: 3, enableTLS: false, cacheKey: "s4", delegate: conformer, contextDelegate: MockChannelContextDelegate()), childChannel: nil, delegate: manager)
+        let c5 = ChildChannelService<ByteBuffer, ByteBuffer>(config: .init(host: "l5", port: 4, enableTLS: false, cacheKey: "s5", delegate: conformer, contextDelegate: MockChannelContextDelegate()), childChannel: nil, delegate: manager)
+        let c6 = ChildChannelService<ByteBuffer, ByteBuffer>(config: .init(host: "l6", port: 5, enableTLS: false, cacheKey: "s6", delegate: conformer, contextDelegate: MockChannelContextDelegate()), childChannel: nil, delegate: manager)
         
         
         for connection in [c1,c2,c3,c4,c5,c6] {
@@ -89,7 +89,8 @@ struct ConnectionManagerKitTests {
     }
     
     @Test func testFindConnection() async throws {
-        let c1 = ChildChannelService<ByteBuffer, ByteBuffer>(config: .init(host: "l1", port: 0, enableTLS: false, cacheKey: "s1"), childChannel: nil, delegate: manager)
+         let conformer = MockConnectionDelegate(manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
+        let c1 = ChildChannelService<ByteBuffer, ByteBuffer>(config: .init(host: "l1", port: 0, enableTLS: false, cacheKey: "s1", delegate: conformer, contextDelegate: MockChannelContextDelegate()), childChannel: nil, delegate: manager)
         await manager.connectionCache.cacheConnection(c1, for: c1.config.cacheKey)
         let fc1 = await manager.connectionCache.findConnection(cacheKey: c1.config.cacheKey)
         let location1 = await getLocation(connection: fc1)
@@ -106,7 +107,8 @@ struct ConnectionManagerKitTests {
     }
     
     @Test func testDeleteConnection() async throws {
-        let c1 = ChildChannelService<ByteBuffer, ByteBuffer>(config: .init(host: "l1", port: 0, enableTLS: false, cacheKey: "s1"), childChannel: nil, delegate: manager)
+         let conformer = MockConnectionDelegate(manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
+        let c1 = ChildChannelService<ByteBuffer, ByteBuffer>(config: .init(host: "l1", port: 0, enableTLS: false, cacheKey: "s1", delegate: conformer, contextDelegate: MockChannelContextDelegate()), childChannel: nil, delegate: manager)
         await manager.connectionCache.cacheConnection(c1, for: c1.config.cacheKey)
         try await manager.connectionCache.removeConnection(c1.config.cacheKey)
         await #expect(manager.connectionCache.fetchAllConnections().isEmpty)
@@ -115,6 +117,11 @@ struct ConnectionManagerKitTests {
 
 
 final class MockConnectionDelegate: ConnectionDelegate {
+
+    func initializedChildChannel<Outbound, Inbound>(_ context: ConnectionManagerKit.ChannelContext<Inbound, Outbound>) async where Outbound : Sendable, Inbound : Sendable {
+        
+    }
+
     
     nonisolated(unsafe) var servers = [ServerLocation]()
     nonisolated(unsafe) let listenerDelegation: ListenerDelegation
@@ -241,4 +248,32 @@ final class MockConnectionDelegate: ConnectionDelegate {
         }
     }
     
+}
+
+final class MockChannelContextDelegate: ChannelContextDelegate {
+    func channelActive(_ stream: AsyncStream<Void>) {
+        
+    }
+
+    func channelInActive(_ stream: AsyncStream<Void>) {
+        
+    }
+
+    func reportChildChannel(error: any Error) async {
+        
+    }
+
+    func shutdownChildConfiguration() async {
+        
+    }
+
+    func deliverWriter<Outbound, Inbound>(context: ConnectionManagerKit.WriterContext<Inbound, Outbound>) async where Outbound : Sendable, Inbound : Sendable {
+        
+    }
+
+    func deliverInboundBuffer<Inbound, Outbound>(context: ConnectionManagerKit.StreamContext<Inbound, Outbound>) async where Inbound : Sendable, Outbound : Sendable {
+        
+    }
+
+
 }
