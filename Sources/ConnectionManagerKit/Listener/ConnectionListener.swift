@@ -15,7 +15,7 @@ public actor ConnectionListener {
     
     
     public var serviceGroup: ServiceGroup?
-    private var sslHandler: NIOSSLServerHandler?
+    private nonisolated(unsafe) var sslHandler: NIOSSLServerHandler?
     public nonisolated(unsafe) var delegate: ConnectionDelegate?
     public nonisolated(unsafe) var listenerDelegate: ListenerDelegate?
     var serverService: ServerChildChannelService<ByteBuffer, ByteBuffer>?
@@ -90,9 +90,9 @@ public actor ConnectionListener {
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(ChannelOptions.socket(IPPROTO_TCP, TCP_NODELAY), value: 1)
             .bind(to: address, childChannelInitializer: { channel in
-                channel.eventLoop.makeCompletedFuture {
+                channel.eventLoop.makeCompletedFuture { [weak self] in
 #if !DEBUG
-                    if let sslHandler = sslHandler {
+                    if let self, let sslHandler = self.sslHandler {
                         try channel.pipeline.syncOperations.addHandler(sslHandler)
                     }
 #endif
