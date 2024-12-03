@@ -15,11 +15,15 @@ public actor ConnectionListener {
     
     
     public var serviceGroup: ServiceGroup?
-    public var sslHandler: NIOSSLServerHandler?
+    private var sslHandler: NIOSSLServerHandler?
     public nonisolated(unsafe) var delegate: ConnectionDelegate?
     public nonisolated(unsafe) var listenerDelegate: ListenerDelegate?
     var serverService: ServerChildChannelService<ByteBuffer, ByteBuffer>?
     
+    public func setSSLHandler(_ sslHandler: NIOSSLServerHandler) async {
+        self.sslHandler = sslHandler
+    }
+
     public func setContextDelegate(_ delegate: ChannelContextDelegate, key: String) async {
         await serverService?.setContextDelegate(delegate, key: key)
     }
