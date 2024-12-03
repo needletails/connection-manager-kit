@@ -8,12 +8,14 @@ import Foundation
 import NIOCore
 import NIOPosix
 import NIOExtras
+import NIOSSL
 import ServiceLifecycle
 
 public actor ConnectionListener {
     
     
     public var serviceGroup: ServiceGroup?
+    public var sslHandler: NIOSSLServerHandler?
     public nonisolated(unsafe) var delegate: ConnectionDelegate?
     public nonisolated(unsafe) var listenerDelegate: ListenerDelegate?
     var serverService: ServerChildChannelService<ByteBuffer, ByteBuffer>?
@@ -86,7 +88,9 @@ public actor ConnectionListener {
             .bind(to: address, childChannelInitializer: { channel in
                 channel.eventLoop.makeCompletedFuture {
 #if !DEBUG
-                    try channel.pipeline.syncOperations.addHandler(try self.getSSLHandler())
+                    if let sslHandler = sslHandler {
+                        try channel.pipeline.syncOperations.addHandler(sslHandler)
+                    }
 #endif
                     try channel.pipeline.syncOperations.addHandlers([
                         LengthFieldPrepender(lengthFieldBitLength: .threeBytes),
