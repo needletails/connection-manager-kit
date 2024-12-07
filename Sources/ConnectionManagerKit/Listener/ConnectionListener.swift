@@ -94,6 +94,7 @@ public actor ConnectionListener {
 #if !DEBUG
                     if let self, let sslHandler = self.sslHandler {
                         try channel.pipeline.syncOperations.addHandler(sslHandler)
+                         print("Supporting Secure Connections")
                     }
 #endif
                     try channel.pipeline.syncOperations.addHandlers([
