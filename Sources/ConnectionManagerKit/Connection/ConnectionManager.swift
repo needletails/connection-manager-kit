@@ -83,8 +83,10 @@ public actor ConnectionManager {
     /// This is the entry point for creating connections. After we create a connection we cache for retieval later
     private func createConnection(server: ServerLocation, timeout: TimeAmount) async throws -> NIOAsyncChannel<ByteBuffer, ByteBuffer> {
         func socketChannelCreator() async throws -> NIOAsyncChannel<ByteBuffer, ByteBuffer> {
-            let sslContext = try NIOSSLContext(
-                configuration: TLSConfiguration.makeClientConfiguration())
+            var config = TLSConfiguration.makeClientConfiguration()
+            config.minimumTLSVersion = .tlsv13
+            config.maximumTLSVersion = .tlsv13
+            let sslContext = try NIOSSLContext(configuration: config)
             let client = ClientBootstrap(group: group)
             let bootstrap = try NIOClientTCPBootstrap(
                 client,
