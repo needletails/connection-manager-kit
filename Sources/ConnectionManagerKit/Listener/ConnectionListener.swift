@@ -17,13 +17,14 @@ public actor ConnectionListener {
     
     
     public var serviceGroup: ServiceGroup?
-    private nonisolated(unsafe) var sslHandler: NIOSSLServerHandler?
-    public nonisolated(unsafe) var delegate: ConnectionDelegate?
-    public nonisolated(unsafe) var listenerDelegate: ListenerDelegate?
+    private var sslHandler: NIOSSLServerHandler? 
+    public var delegate: ConnectionDelegate?
+    public var listenerDelegate: ListenerDelegate?
     var serverService: ServerChildChannelService<ByteBuffer, ByteBuffer>?
     let logger: NeedleTailLogger
     public func setSSLHandler(_ sslHandler: NIOSSLServerHandler) async {
         self.sslHandler = sslHandler
+        await logger.log(level: .info, message: "Set SSLHandler: \(sslHandler)")
     }
 
     public func setContextDelegate(_ delegate: ChannelContextDelegate, key: String) async {
@@ -92,6 +93,7 @@ public actor ConnectionListener {
         address: SocketAddress,
         configuration: Configuration
     ) async throws -> NIOAsyncChannel<NIOAsyncChannel<ByteBuffer, ByteBuffer>, Never> {
+          let sslHandler = self.sslHandler
         return try await ServerBootstrap(group: configuration.group)
         // Specify backlog and enable SO_REUSEADDR for the server itself
             .serverChannelOption(ChannelOptions.backlog, value: Int32(configuration.backlog))
@@ -99,12 +101,12 @@ public actor ConnectionListener {
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(ChannelOptions.socket(IPPROTO_TCP, TCP_NODELAY), value: 1)
             .bind(to: address, childChannelInitializer: { channel in
-                channel.eventLoop.makeCompletedFuture { [weak self] in
-#if !DEBUG
-                    if let self, let sslHandler = self.sslHandler {
+                return channel.eventLoop.makeCompletedFuture {
+                    
+                    if let sslHandler = sslHandler {
                         try channel.pipeline.syncOperations.addHandler(sslHandler)
                     }
-#endif
+
                     try channel.pipeline.syncOperations.addHandlers([
                         LengthFieldPrepender(lengthFieldBitLength: .threeBytes),
                         ByteToMessageHandler(
@@ -124,3 +126,5 @@ extension ConnectionListener: ChildChannelServiceDelelgate {
         await delegate?.initializedChildChannel(context)
     }
 }
+
+extension NIOSSLHandler: @unchecked Sendable {}
