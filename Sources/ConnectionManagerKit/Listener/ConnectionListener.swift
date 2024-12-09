@@ -127,4 +127,4 @@ extension ConnectionListener: ChildChannelServiceDelelgate {
     }
 }
 
-extension NIOSSLHandler: @unchecked Sendable {}
+extension NIOSSLHandler: @retroactive @unchecked Sendable {}

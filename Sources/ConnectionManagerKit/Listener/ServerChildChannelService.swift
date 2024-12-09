@@ -14,8 +14,8 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
     let delegate: ChildChannelServiceDelelgate
     var listenerDelegate: ListenerDelegate?
     var contextDelegates: [String: ChannelContextDelegate] = [:]
-    var inboundContinuation: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation?
-    var outboundContinuation: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation?
+    var inboundContinuation: [String: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation] = [:]
+    var outboundContinuation: [String: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation] = [:]
     
     
     public func setContextDelegate(_ contextDelegate: ChannelContextDelegate, key: String) async {
@@ -102,8 +102,10 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
     }
     
     func shutdownChildChannel(id: String) async {
-        self.inboundContinuation?.finish()
-        self.outboundContinuation?.finish()
+        self.inboundContinuation[id]?.finish()
+        self.outboundContinuation[id]?.finish()
+        self.inboundContinuation.removeValue(forKey: id)
+        self.outboundContinuation.removeValue(forKey: id)
         contextDelegates.removeValue(forKey: id)
     }
     
@@ -111,16 +113,15 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
     nonisolated func handleChildChannel(childChannel: NIOAsyncChannel<Inbound, Outbound>) async throws {
         try await childChannel.executeThenClose { inbound, outbound in
             try await withThrowingDiscardingTaskGroup { group in
-                
                 let channelId = UUID()
-                let channelContext = ChannelContext(
-                    id: channelId.uuidString,
-                    channel: childChannel)
-                await delegate.initializedChildChannel(channelContext)
-
                 do {
+                    let channelContext = ChannelContext(
+                        id: channelId.uuidString,
+                        channel: childChannel)
+                    await delegate.initializedChildChannel(channelContext)
+                    
                     let (_outbound, outboundContinuation) = AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.makeStream()
-                    await setOutboundContinuation(outboundContinuation)
+                    await setOutboundContinuation(outboundContinuation, id: channelId.uuidString)
                     outboundContinuation.onTermination = { status in
 #if DEBUG
                         print("Server Writer Stream Terminated with status: \(status)")
@@ -128,7 +129,7 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
                     }
                     
                     let (_inbound, inboundContinuation) = AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.makeStream()
-                    await setInboundContinuation(inboundContinuation)
+                    await setInboundContinuation(inboundContinuation, id: channelId.uuidString)
                     inboundContinuation.onTermination = { status in
 #if DEBUG
                         print("Server Inbound Stream Terminated with status: \(status)")
@@ -176,18 +177,17 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
                 } catch {
                     if let contextDelegate = await contextDelegates[channelId.uuidString] {
                         await contextDelegate.reportChildChannel(error: error)
-                        await contextDelegate.shutdownChildConfiguration()
                     }
                 }
             }
         }
     }
     
-    func setInboundContinuation(_ continuation: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation) async {
-        self.inboundContinuation = continuation
+    func setInboundContinuation(_ continuation: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation, id: String) async {
+        self.inboundContinuation[id] = continuation
     }
     
-    func setOutboundContinuation(_ continuation: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation) async {
-        self.outboundContinuation = continuation
+    func setOutboundContinuation(_ continuation: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation, id: String) async {
+        self.outboundContinuation[id] = continuation
     }
 }
