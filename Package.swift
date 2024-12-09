@@ -22,7 +22,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.71.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.1"),
         .package(url: "https://github.com/apple/swift-nio-transport-services.git", from: "1.19.0"),
-        .package(url: "https://github.com/apple/swift-nio-extras.git", from: "1.13.0")
+        .package(url: "https://github.com/apple/swift-nio-extras.git", from: "1.13.0"),
+        .package(url: "git@github.com:needle-tail/needletail-logger.git", .upToNextMajor(from: "2.0.5")),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -35,7 +36,8 @@ let package = Package(
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOTransportServices", package: "swift-nio-transport-services"),
                 .product(name: "NIOExtras", package: "swift-nio-extras"),
-                .product(name: "NIOSSL", package: "swift-nio-ssl")
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+                .product(name: "NeedleTailLogger", package: "needletail-logger"),
             ]),
         .testTarget(
             name: "ConnectionManagerKitTests",

@@ -37,6 +37,6 @@ public protocol ChannelContextDelegate: AnyObject, Sendable {
 
 
 // MARK: Server Side
-public protocol ListenerDelegate: AnyObject {
-    func didBindServer(channel: NIOAsyncChannel<NIOAsyncChannel<ByteBuffer, ByteBuffer>, Never>) async
+public protocol ListenerDelegate: AnyObject, Sendable {
+    func didBindServer<Inbound: Sendable, Outbound: Sendable>(channel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>) async
 }

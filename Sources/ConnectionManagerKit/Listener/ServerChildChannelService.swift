@@ -12,6 +12,7 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
     
     let serverChannel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>
     let delegate: ChildChannelServiceDelelgate
+    var listenerDelegate: ListenerDelegate?
     var contextDelegates: [String: ChannelContextDelegate] = [:]
     var inboundContinuation: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation?
     var outboundContinuation: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation?
@@ -23,10 +24,12 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
     
     init(
         serverChannel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>,
-        delegate: ChildChannelServiceDelelgate
+        delegate: ChildChannelServiceDelelgate,
+        listenerDelegate: ListenerDelegate?
     ) {
         self.serverChannel = serverChannel
         self.delegate = delegate
+        self.listenerDelegate = listenerDelegate
     }
     
     func run() async throws {
@@ -36,6 +39,7 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
     nonisolated private func executeTask() async throws {
         
         let serverChannelInTaskGroup = try await encapsulatedServerChannelInTaskGroup(serverChannel: serverChannel)
+        await self.listenerDelegate?.didBindServer(channel: serverChannel)
         try await handleChildTaskGroup(serverChannel: serverChannelInTaskGroup) { childChannel in
             do {
                 try await self.handleChildChannel(childChannel: childChannel)

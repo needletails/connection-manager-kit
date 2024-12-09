@@ -10,6 +10,8 @@ import NIOPosix
 import NIOExtras
 import NIOSSL
 import ServiceLifecycle
+import NeedleTailLogger
+import Logging
 
 public actor ConnectionListener {
     
@@ -19,7 +21,7 @@ public actor ConnectionListener {
     public nonisolated(unsafe) var delegate: ConnectionDelegate?
     public nonisolated(unsafe) var listenerDelegate: ListenerDelegate?
     var serverService: ServerChildChannelService<ByteBuffer, ByteBuffer>?
-    
+    let logger: NeedleTailLogger
     public func setSSLHandler(_ sslHandler: NIOSSLServerHandler) async {
         self.sslHandler = sslHandler
     }
@@ -28,7 +30,9 @@ public actor ConnectionListener {
         await serverService?.setContextDelegate(delegate, key: key)
     }
     
-    public init() {}
+    public init(logger: NeedleTailLogger = NeedleTailLogger(.init(label: "[Connection Listener]"))) {
+        self.logger = logger
+    }
     
     public func resolveAddress(_ configuration: Configuration) throws -> Configuration {
         var configuration = configuration
@@ -65,13 +69,18 @@ public actor ConnectionListener {
         let serverChannel = try await bindServer(
             address: address,
             configuration: configuration)
-        await self.listenerDelegate?.didBindServer(channel: serverChannel)
-        
-        let serverService = ServerChildChannelService<ByteBuffer, ByteBuffer>(serverChannel: serverChannel, delegate: self)
+        if let sslHandler = self.sslHandler {
+            await self.logger.log(level: .info, message: "Supporting Secure Connections \(sslHandler)")
+        }
+        let serverService = ServerChildChannelService<ByteBuffer, ByteBuffer>(
+            serverChannel: serverChannel,
+             delegate: self,
+             listenerDelegate: listenerDelegate
+             )
         self.serverService = serverService
         serviceGroup = ServiceGroup(
             services: [serverService],
-            logger: .init(label: "[Connection Listener]"))
+            logger: .init(label: "[Listener Service Group]"))
         try await serverService.run()
     }
     
@@ -94,7 +103,6 @@ public actor ConnectionListener {
 #if !DEBUG
                     if let self, let sslHandler = self.sslHandler {
                         try channel.pipeline.syncOperations.addHandler(sslHandler)
-                         print("Supporting Secure Connections")
                     }
 #endif
                     try channel.pipeline.syncOperations.addHandlers([
