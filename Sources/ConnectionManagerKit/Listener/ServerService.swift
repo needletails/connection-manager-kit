@@ -12,7 +12,7 @@ import NIOExtras
 import ServiceLifecycle
 import NeedleTailLogger
 
-actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service {
+actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
     
     let address: SocketAddress
     let configuration: Configuration

@@ -20,7 +20,7 @@ public actor ConnectionListener {
     private var sslHandler: NIOSSLServerHandler? 
     public var delegate: ConnectionDelegate?
     public var listenerDelegate: ListenerDelegate?
-    var serverService: ServerChildChannelService<ByteBuffer, ByteBuffer>?
+    var serverService: ServerService<ByteBuffer, ByteBuffer>?
     let logger: NeedleTailLogger
     public func setSSLHandler(_ sslHandler: NIOSSLServerHandler) async {
         self.sslHandler = sslHandler
@@ -68,7 +68,7 @@ public actor ConnectionListener {
         self.delegate = delegate
         self.listenerDelegate = listenerDelegate
        
-        let serverService = ServerChildChannelService<ByteBuffer, ByteBuffer>(
+        let serverService = ServerService<ByteBuffer, ByteBuffer>(
             address: address,
             configuration: configuration,
             logger: logger,
