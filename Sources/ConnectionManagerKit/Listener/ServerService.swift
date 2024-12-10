@@ -22,9 +22,9 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
     var contextDelegates: [String: ChannelContextDelegate] = [:]
     var inboundContinuation: [String: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation] = [:]
     var outboundContinuation: [String: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation] = [:]
-    private var sslHandler: NIOSSLHandler?
+    private var sslHandler: NIOSSLServerHandler?
 
-    func setSSLHandler(_ sslHandler: NIOSSLHandler) async {
+    func setSSLHandler(_ sslHandler: NIOSSLServerHandler) async {
         self.sslHandler = sslHandler
     }
 
