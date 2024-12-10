@@ -67,18 +67,17 @@ public actor ConnectionListener {
     ) async throws {
         self.delegate = delegate
         self.listenerDelegate = listenerDelegate
-        let serverChannel = try await bindServer(
-            address: address,
-            configuration: configuration)
-        if let sslHandler = self.sslHandler {
-            await self.logger.log(level: .info, message: "Supporting Secure Connections \(sslHandler)")
-        }
+       
         let serverService = ServerChildChannelService<ByteBuffer, ByteBuffer>(
-            serverChannel: serverChannel,
+            address: address,
+            configuration: configuration,
             logger: logger,
-             delegate: self,
-             listenerDelegate: listenerDelegate
+            delegate: self,
+            listenerDelegate: listenerDelegate
              )
+        if let sslHandler {
+            await serverService.setSSLHandler(sslHandler)
+        }
         self.serverService = serverService
         serviceGroup = ServiceGroup(
             services: [serverService],
@@ -88,36 +87,6 @@ public actor ConnectionListener {
     
     public func shutdownChildChannel(id: String) async {
         await serverService?.shutdownChildChannel(id: id)
-    }
-    
-    func bindServer(
-        address: SocketAddress,
-        configuration: Configuration
-    ) async throws -> NIOAsyncChannel<NIOAsyncChannel<ByteBuffer, ByteBuffer>, Never> {
-          let sslHandler = self.sslHandler
-        return try await ServerBootstrap(group: configuration.group)
-        // Specify backlog and enable SO_REUSEADDR for the server itself
-            .serverChannelOption(ChannelOptions.backlog, value: Int32(configuration.backlog))
-        // Enable TCP_NODELAY and SO_REUSEADDR for the accepted Channels
-            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-            .childChannelOption(ChannelOptions.socket(IPPROTO_TCP, TCP_NODELAY), value: 1)
-            .bind(to: address, childChannelInitializer: { channel in
-                return channel.eventLoop.makeCompletedFuture {
-                    
-                    if let sslHandler = sslHandler {
-                        try channel.pipeline.syncOperations.addHandler(sslHandler)
-                    }
-
-                    try channel.pipeline.syncOperations.addHandlers([
-                        LengthFieldPrepender(lengthFieldBitLength: .threeBytes),
-                        ByteToMessageHandler(
-                            LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes),
-                            maximumBufferSize: 16777216
-                        ),
-                    ])
-                    return try NIOAsyncChannel(wrappingChannelSynchronously: channel)
-                }
-            })
     }
 }
 

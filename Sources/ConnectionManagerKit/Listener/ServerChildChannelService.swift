@@ -6,31 +6,41 @@
 //
 import Foundation
 import NIOCore
+import NIOPosix
+import NIOSSL
+import NIOExtras
 import ServiceLifecycle
 import NeedleTailLogger
 
 actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service {
     
-    let serverChannel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>
+    let address: SocketAddress
+    let configuration: Configuration
     let delegate: ChildChannelServiceDelelgate
     let logger: NeedleTailLogger
     var listenerDelegate: ListenerDelegate?
     var contextDelegates: [String: ChannelContextDelegate] = [:]
     var inboundContinuation: [String: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation] = [:]
     var outboundContinuation: [String: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation] = [:]
-    
-    
+    private var sslHandler: NIOSSLHandler?
+
+    func setSSLHandler(_ sslHandler: NIOSSLHandler) async {
+        self.sslHandler = sslHandler
+    }
+
     public func setContextDelegate(_ contextDelegate: ChannelContextDelegate, key: String) async {
         self.contextDelegates[key] = contextDelegate
     }
     
     init(
-        serverChannel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>,
+        address: SocketAddress, 
+        configuration: Configuration,
         logger: NeedleTailLogger,
         delegate: ChildChannelServiceDelelgate,
         listenerDelegate: ListenerDelegate?
     ) {
-        self.serverChannel = serverChannel
+        self.address = address
+        self.configuration = configuration
         self.logger = logger
         self.delegate = delegate
         self.listenerDelegate = listenerDelegate
@@ -41,7 +51,10 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
     }
     
     nonisolated private func executeTask() async throws {
-        
+        let serverChannel = try await bindServer(address: address, configuration: configuration)
+         if let sslHandler = await self.sslHandler {
+            await self.logger.log(level: .info, message: "Supporting Secure Connections \(sslHandler)")
+        }
         let serverChannelInTaskGroup = try await encapsulatedServerChannelInTaskGroup(serverChannel: serverChannel)
         await self.listenerDelegate?.didBindServer(channel: serverChannel)
         try await handleChildTaskGroup(serverChannel: serverChannelInTaskGroup) { childChannel in
@@ -53,6 +66,36 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
                 }
             }
         }
+    }
+
+        func bindServer(
+        address: SocketAddress,
+        configuration: Configuration
+    ) async throws -> NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never> {
+          let sslHandler = self.sslHandler
+        return try await ServerBootstrap(group: configuration.group)
+        // Specify backlog and enable SO_REUSEADDR for the server itself
+            .serverChannelOption(ChannelOptions.backlog, value: Int32(configuration.backlog))
+        // Enable TCP_NODELAY and SO_REUSEADDR for the accepted Channels
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelOption(ChannelOptions.socket(IPPROTO_TCP, TCP_NODELAY), value: 1)
+            .bind(to: address, childChannelInitializer: { channel in
+                return channel.eventLoop.makeCompletedFuture {
+                    
+                    if let sslHandler = sslHandler {
+                        try channel.pipeline.syncOperations.addHandler(sslHandler)
+                    }
+
+                    try channel.pipeline.syncOperations.addHandlers([
+                        LengthFieldPrepender(lengthFieldBitLength: .threeBytes),
+                        ByteToMessageHandler(
+                            LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes),
+                            maximumBufferSize: 16777216
+                        ),
+                    ])
+                    return try NIOAsyncChannel(wrappingChannelSynchronously: channel)
+                }
+            })
     }
     
     func encapsulatedServerChannelInTaskGroup(
