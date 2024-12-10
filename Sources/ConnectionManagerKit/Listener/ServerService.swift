@@ -22,7 +22,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
     var inboundContinuation: [String: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation] = [:]
     var outboundContinuation: [String: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation] = [:]
     weak var listenerDelegate: ListenerDelegate?
-    weak var serviceListenerDeleger: ServiceListenerDelegate?
+    nonisolated(unsafe) weak var serviceListenerDeleger: ServiceListenerDelegate?
 
     public func setContextDelegate(_ contextDelegate: ChannelContextDelegate, key: String) async {
         self.contextDelegates[key] = contextDelegate
@@ -73,7 +73,6 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
         address: SocketAddress,
         configuration: Configuration
     ) async throws -> NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never> {
-          let sslHandler = await self.serviceListenerDeleger?.retrieveSSLHandler()
         return try await ServerBootstrap(group: configuration.group)
         // Specify backlog and enable SO_REUSEADDR for the server itself
             .serverChannelOption(ChannelOptions.backlog, value: Int32(configuration.backlog))
@@ -83,7 +82,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
             .bind(to: address, childChannelInitializer: { channel in
                 return channel.eventLoop.makeCompletedFuture {
                     
-                    if let sslHandler = sslHandler {
+                    if let sslHandler = self.serviceListenerDeleger?.retrieveSSLHandler() {
                         try channel.pipeline.syncOperations.addHandler(sslHandler)
                     }
 

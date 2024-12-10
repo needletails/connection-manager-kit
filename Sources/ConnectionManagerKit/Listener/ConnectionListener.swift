@@ -17,12 +17,12 @@ public actor ConnectionListener: ServiceListenerDelegate {
     
     public var serviceGroup: ServiceGroup?
     public var delegate: ConnectionDelegate?
-    public var listenerDelegate: ListenerDelegate?
+    nonisolated(unsafe) public var listenerDelegate: ListenerDelegate?
     var serverService: ServerService<ByteBuffer, ByteBuffer>?
     let logger: NeedleTailLogger
 
-    func retrieveSSLHandler() async -> NIOSSL.NIOSSLServerHandler? {
-        await listenerDelegate?.retrieveSSLHandler()
+    nonisolated func retrieveSSLHandler() -> NIOSSL.NIOSSLServerHandler? {
+        listenerDelegate?.retrieveSSLHandler()
     }
 
     public func setContextDelegate(_ delegate: ChannelContextDelegate, key: String) async {
