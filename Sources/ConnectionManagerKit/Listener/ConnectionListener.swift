@@ -75,6 +75,7 @@ public actor ConnectionListener {
         }
         let serverService = ServerChildChannelService<ByteBuffer, ByteBuffer>(
             serverChannel: serverChannel,
+            logger: logger,
              delegate: self,
              listenerDelegate: listenerDelegate
              )

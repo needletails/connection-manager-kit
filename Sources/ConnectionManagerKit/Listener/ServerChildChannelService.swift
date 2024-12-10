@@ -7,11 +7,13 @@
 import Foundation
 import NIOCore
 import ServiceLifecycle
+import NeedleTailLogger
 
 actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service {
     
     let serverChannel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>
     let delegate: ChildChannelServiceDelelgate
+    let logger: NeedleTailLogger
     var listenerDelegate: ListenerDelegate?
     var contextDelegates: [String: ChannelContextDelegate] = [:]
     var inboundContinuation: [String: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation] = [:]
@@ -24,10 +26,12 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
     
     init(
         serverChannel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>,
+        logger: NeedleTailLogger,
         delegate: ChildChannelServiceDelelgate,
         listenerDelegate: ListenerDelegate?
     ) {
         self.serverChannel = serverChannel
+        self.logger = logger
         self.delegate = delegate
         self.listenerDelegate = listenerDelegate
     }
@@ -180,6 +184,9 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
                     }
                 }
             }
+            await logger.log(level: .info, message: "Finishing Child Channel")
+            try await childChannel.channel.close()
+            await logger.log(level: .info, message: "Is Channel Active: \(childChannel.channel.isActive)")
         }
     }
     
