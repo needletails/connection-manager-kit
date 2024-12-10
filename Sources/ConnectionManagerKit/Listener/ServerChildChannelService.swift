@@ -74,7 +74,7 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
             try await inboundChannelCompletion()
             // Create a group for the child channel
             try await withThrowingDiscardingTaskGroup { group in
-                for try await childChannel in inbound.cancelOnGracefulShutdown() {
+                for try await childChannel in inbound {
                     // For each new client that connects to the server, create a new group for that handler
                     group.addTask {
                         try await childChannelCompletion(childChannel)
@@ -91,7 +91,7 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
         try await serverChannel.executeThenClose { inbound in
             // Create a group for the child channel
             try await withThrowingDiscardingTaskGroup { group in
-                for try await childChannel in inbound.cancelOnGracefulShutdown() {
+                for try await childChannel in inbound {
                     // For each new client that connects to the server, create a new group for that handler
                     group.addTask {
                         try await childChannelCompletion(childChannel)
