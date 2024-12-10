@@ -57,18 +57,21 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
         }
         let serverChannelInTaskGroup = try await encapsulatedServerChannelInTaskGroup(serverChannel: serverChannel)
         await self.listenerDelegate?.didBindServer(channel: serverChannel)
+        let logger = NeedleTailLogger()
         try await handleChildTaskGroup(serverChannel: serverChannelInTaskGroup) { childChannel in
             do {
                 try await self.handleChildChannel(childChannel: childChannel)
+                await logger.log(level: .info, message: "Finished CHILD TASK3")
             } catch {
                 try await childChannel.executeThenClose { inbound, outbound in
                     outbound.finish()
                 }
             }
         }
+        await logger.log(level: .info, message: "Finished CHILD TASK4")
     }
 
-        func bindServer(
+    func bindServer(
         address: SocketAddress,
         configuration: Configuration
     ) async throws -> NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never> {
@@ -95,7 +98,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
                     ])
                     return try NIOAsyncChannel(wrappingChannelSynchronously: channel)
                 }
-            })
+        })
     }
     
     func encapsulatedServerChannelInTaskGroup(
@@ -135,6 +138,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
         serverChannel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>,
         childChannelCompletion: @Sendable @escaping (NIOAsyncChannel<Inbound, Outbound>) async throws -> Void
     ) async throws {
+        let logger = NeedleTailLogger()
         try await serverChannel.executeThenClose { inbound in
             // Create a group for the child channel
             try await withThrowingDiscardingTaskGroup { group in
@@ -142,7 +146,9 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
                     // For each new client that connects to the server, create a new group for that handler
                     group.addTask {
                         try await childChannelCompletion(childChannel)
+                         await logger.log(level: .info, message: "Finished CHILD TASK1")
                     }
+                    await logger.log(level: .info, message: "Finished CHILD TASK2")
                 }
             }
         }
@@ -189,7 +195,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
                     
                     _ = group.addTaskUnlessCancelled { [weak self] in
                         guard let self else { return }
-                        for await writer in _outbound {
+                        for await writer in _outbound.cancelOnGracefulShutdown() {
                             let writerContext = WriterContext(
                                 id: channelId.uuidString,
                                 channel: childChannel,
@@ -201,7 +207,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
                     }
                     
                     for await stream in _inbound {
-                        for try await inbound in stream {
+                        for try await inbound in stream.cancelOnGracefulShutdown() {
                             group.addTask { [weak self] in
                                 guard let self else { return }
                                 let streamContext = StreamContext(
@@ -230,6 +236,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
             await logger.log(level: .info, message: "Finishing Child Channel")
         }
         await logger.log(level: .info, message: "Is Channel Active: \(childChannel.channel.isActive)")
+        await logger.log(level: .info, message: "Channel Pipeline: \(childChannel.channel.pipeline)")
     }
     
     func setInboundContinuation(_ continuation: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation, id: String) async {

@@ -58,7 +58,7 @@ actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service {
                 
                 group.addTask { [weak self] in
                     guard let self else { return }
-                    for await writer in _outbound {
+                    for await writer in _outbound.cancelOnGracefulShutdown() {
                         let writerContext = WriterContext(
                             id: channelId,
                             channel: childChannel,
