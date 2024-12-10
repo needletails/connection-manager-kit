@@ -154,7 +154,7 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
                     }
                     
                     for await stream in _inbound {
-                        for try await inbound in stream.cancelOnGracefulShutdown() {
+                        for try await inbound in stream {
                             group.addTask { [weak self] in
                                 guard let self else { return }
                                 let streamContext = StreamContext(
@@ -177,9 +177,6 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
                 } catch {
                     if let contextDelegate = await contextDelegates[channelId.uuidString] {
                         await contextDelegate.reportChildChannel(error: error)
-                        try await childChannel.executeThenClose { inbound, outbound in
-                            outbound.finish()
-                        }
                     }
                 }
             }
