@@ -49,18 +49,12 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
     }
     
     nonisolated func executeTask() async throws {
-        let logger = NeedleTailLogger()
         let serverChannel = try await bindServer(address: address, configuration: configuration)
-        //  if let sslHandler = await self.sslHandler {
-        //     await self.logger.log(level: .info, message: "Supporting Secure Connections \(sslHandler)")
-        // }
         let serverChannelInTaskGroup = try await encapsulatedServerChannelInTaskGroup(serverChannel: serverChannel)
         await self.listenerDelegate?.didBindServer(channel: serverChannel)
         try await handleChildTaskGroup(serverChannel: serverChannelInTaskGroup) { childChannel in
             do {
-                await logger.log(level: .info, message: "HANDLE CHILD")
                 try await self.handleChildChannel(childChannel: childChannel)
-                  await logger.log(level: .info, message: "FINISHED HANDLE CHILD")
             } catch {
                 try await childChannel.executeThenClose { inbound, outbound in
                     outbound.finish()
