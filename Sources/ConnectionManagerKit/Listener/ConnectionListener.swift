@@ -22,7 +22,6 @@ public actor ConnectionListener {
     public var listenerDelegate: ListenerDelegate?
     var serverService: ServerService<ByteBuffer, ByteBuffer>?
     let logger: NeedleTailLogger
-    
     public func setSSLHandler(_ sslHandler: NIOSSLServerHandler) async {
         self.sslHandler = sslHandler
         await logger.log(level: .info, message: "Set SSLHandler: \(sslHandler)")
@@ -80,11 +79,10 @@ public actor ConnectionListener {
             await serverService.setSSLHandler(sslHandler)
         }
         self.serverService = serverService
-        // serviceGroup = ServiceGroup(
-        //     services: [serverService],
-        //     logger: .init(label: "[Listener Service Group]"))
-       // try await serverService.run()
-       try await serverService.executeTask()
+        serviceGroup = ServiceGroup(
+            services: [serverService],
+            logger: .init(label: "[Listener Service Group]"))
+        try await serverService.run()
     }
     
     public func shutdownChildChannel(id: String) async {
