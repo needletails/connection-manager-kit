@@ -50,18 +50,16 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
         try await executeTask()
     }
     
-    nonisolated private func executeTask() async throws {
+    nonisolated func executeTask() async throws {
         let serverChannel = try await bindServer(address: address, configuration: configuration)
          if let sslHandler = await self.sslHandler {
             await self.logger.log(level: .info, message: "Supporting Secure Connections \(sslHandler)")
         }
         let serverChannelInTaskGroup = try await encapsulatedServerChannelInTaskGroup(serverChannel: serverChannel)
         await self.listenerDelegate?.didBindServer(channel: serverChannel)
-        let logger = NeedleTailLogger()
         try await handleChildTaskGroup(serverChannel: serverChannelInTaskGroup) { childChannel in
             do {
                 try await self.handleChildChannel(childChannel: childChannel)
-                await logger.log(level: .info, message: "Finished CHILD TASK3")
             } catch {
                 try await childChannel.executeThenClose { inbound, outbound in
                     outbound.finish()
@@ -138,7 +136,6 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
         serverChannel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>,
         childChannelCompletion: @Sendable @escaping (NIOAsyncChannel<Inbound, Outbound>) async throws -> Void
     ) async throws {
-        let logger = NeedleTailLogger()
         try await serverChannel.executeThenClose { inbound in
             // Create a group for the child channel
             try await withThrowingDiscardingTaskGroup { group in
@@ -146,9 +143,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
                     // For each new client that connects to the server, create a new group for that handler
                     group.addTask {
                         try await childChannelCompletion(childChannel)
-                         await logger.log(level: .info, message: "Finished CHILD TASK1")
                     }
-                    await logger.log(level: .info, message: "Finished CHILD TASK2")
                 }
             }
         }
@@ -233,10 +228,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
                     }
                 }
             }
-            await logger.log(level: .info, message: "Finishing Child Channel")
         }
-        await logger.log(level: .info, message: "Is Channel Active: \(childChannel.channel.isActive)")
-        await logger.log(level: .info, message: "Channel Pipeline: \(childChannel.channel.pipeline)")
     }
     
     func setInboundContinuation(_ continuation: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation, id: String) async {

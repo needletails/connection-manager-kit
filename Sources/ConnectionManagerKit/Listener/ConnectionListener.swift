@@ -80,10 +80,11 @@ public actor ConnectionListener {
             await serverService.setSSLHandler(sslHandler)
         }
         self.serverService = serverService
-        serviceGroup = ServiceGroup(
-            services: [serverService],
-            logger: .init(label: "[Listener Service Group]"))
-        try await serverService.run()
+        // serviceGroup = ServiceGroup(
+        //     services: [serverService],
+        //     logger: .init(label: "[Listener Service Group]"))
+       // try await serverService.run()
+       try await serverService.executeTask()
     }
     
     public func shutdownChildChannel(id: String) async {
