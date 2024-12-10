@@ -18,15 +18,11 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
     let configuration: Configuration
     let delegate: ChildChannelServiceDelelgate
     let logger: NeedleTailLogger
-    var listenerDelegate: ListenerDelegate?
     var contextDelegates: [String: ChannelContextDelegate] = [:]
     var inboundContinuation: [String: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation] = [:]
     var outboundContinuation: [String: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation] = [:]
-    private var sslHandler: NIOSSLServerHandler?
-
-    func setSSLHandler(_ sslHandler: NIOSSLServerHandler) async {
-        self.sslHandler = sslHandler
-    }
+    weak var listenerDelegate: ListenerDelegate?
+    weak var serviceListenerDeleger: ServiceListenerDelegate?
 
     public func setContextDelegate(_ contextDelegate: ChannelContextDelegate, key: String) async {
         self.contextDelegates[key] = contextDelegate
@@ -37,13 +33,15 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
         configuration: Configuration,
         logger: NeedleTailLogger,
         delegate: ChildChannelServiceDelelgate,
-        listenerDelegate: ListenerDelegate?
+        listenerDelegate: ListenerDelegate?,
+        serviceListenerDeleger: ServiceListenerDelegate?
     ) {
         self.address = address
         self.configuration = configuration
         self.logger = logger
         self.delegate = delegate
         self.listenerDelegate = listenerDelegate
+        self.serviceListenerDeleger = serviceListenerDeleger
     }
     
     func run() async throws {
@@ -51,29 +49,31 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
     }
     
     nonisolated func executeTask() async throws {
+        let logger = NeedleTailLogger()
         let serverChannel = try await bindServer(address: address, configuration: configuration)
-         if let sslHandler = await self.sslHandler {
-            await self.logger.log(level: .info, message: "Supporting Secure Connections \(sslHandler)")
-        }
+        //  if let sslHandler = await self.sslHandler {
+        //     await self.logger.log(level: .info, message: "Supporting Secure Connections \(sslHandler)")
+        // }
         let serverChannelInTaskGroup = try await encapsulatedServerChannelInTaskGroup(serverChannel: serverChannel)
         await self.listenerDelegate?.didBindServer(channel: serverChannel)
         try await handleChildTaskGroup(serverChannel: serverChannelInTaskGroup) { childChannel in
             do {
+                await logger.log(level: .info, message: "HANDLE CHILD")
                 try await self.handleChildChannel(childChannel: childChannel)
+                  await logger.log(level: .info, message: "FINISHED HANDLE CHILD")
             } catch {
                 try await childChannel.executeThenClose { inbound, outbound in
                     outbound.finish()
                 }
             }
         }
-        await logger.log(level: .info, message: "Finished CHILD TASK4")
     }
 
     func bindServer(
         address: SocketAddress,
         configuration: Configuration
     ) async throws -> NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never> {
-          let sslHandler = self.sslHandler
+          let sslHandler = await self.serviceListenerDeleger?.retrieveSSLHandler()
         return try await ServerBootstrap(group: configuration.group)
         // Specify backlog and enable SO_REUSEADDR for the server itself
             .serverChannelOption(ChannelOptions.backlog, value: Int32(configuration.backlog))
@@ -122,7 +122,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
             try await inboundChannelCompletion()
             // Create a group for the child channel
             try await withThrowingDiscardingTaskGroup { group in
-                for try await childChannel in inbound {
+                for try await childChannel in inbound.cancelOnGracefulShutdown() {
                     // For each new client that connects to the server, create a new group for that handler
                     group.addTask {
                         try await childChannelCompletion(childChannel)
@@ -142,17 +142,11 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
             // Create a group for the child channel
             try await withThrowingDiscardingTaskGroup { group in
             await logger.log(level: .info, message: "IN TASK GROUP")
-                for try await childChannel in inbound {
-                    await logger.log(level: .info, message: "IN CHILD CHANNEL")
-                     await logger.log(level: .info, message: "PIPELINE \(childChannel.channel.pipeline)")
+                for try await childChannel in inbound.cancelOnGracefulShutdown() {
                     // For each new client that connects to the server, create a new group for that handler
                     group.addTask {
-                        await logger.log(level: .info, message: "IN CHANNEL TASK")
                         try await childChannelCompletion(childChannel)
-                        await logger.log(level: .info, message: "FINISHED IN CHANNEL TASK")
                     }
-                    await logger.log(level: .info, message: "FINISHED IN CHILD CHANNEL")
-                    await logger.log(level: .info, message: "FINISHED PIPELINE \(childChannel.channel.pipeline)")
                 }
             }
         }

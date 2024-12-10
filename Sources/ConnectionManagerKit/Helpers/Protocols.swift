@@ -6,6 +6,7 @@
 //
 import Foundation
 import NIOCore
+import NIOSSL
 #if canImport(Network)
 import Network
 #endif
@@ -39,4 +40,9 @@ public protocol ChannelContextDelegate: AnyObject, Sendable {
 // MARK: Server Side
 public protocol ListenerDelegate: AnyObject, Sendable {
     func didBindServer<Inbound: Sendable, Outbound: Sendable>(channel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>) async
+    func retrieveSSLHandler() async -> NIOSSLServerHandler?
+}
+
+protocol ServiceListenerDelegate: AnyObject, Sendable {
+    func retrieveSSLHandler() async -> NIOSSLServerHandler?
 }

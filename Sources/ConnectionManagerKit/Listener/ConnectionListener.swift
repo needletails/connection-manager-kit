@@ -13,18 +13,16 @@ import ServiceLifecycle
 import NeedleTailLogger
 import Logging
 
-public actor ConnectionListener {
-    
+public actor ConnectionListener: ServiceListenerDelegate {
     
     public var serviceGroup: ServiceGroup?
-    private var sslHandler: NIOSSLServerHandler? 
     public var delegate: ConnectionDelegate?
     public var listenerDelegate: ListenerDelegate?
     var serverService: ServerService<ByteBuffer, ByteBuffer>?
     let logger: NeedleTailLogger
-    public func setSSLHandler(_ sslHandler: NIOSSLServerHandler) async {
-        self.sslHandler = sslHandler
-        await logger.log(level: .info, message: "Set SSLHandler: \(sslHandler)")
+
+    func retrieveSSLHandler() async -> NIOSSL.NIOSSLServerHandler? {
+        await listenerDelegate?.retrieveSSLHandler()
     }
 
     public func setContextDelegate(_ delegate: ChannelContextDelegate, key: String) async {
@@ -73,11 +71,10 @@ public actor ConnectionListener {
             configuration: configuration,
             logger: logger,
             delegate: self,
-            listenerDelegate: listenerDelegate
-             )
-        if let sslHandler {
-            await serverService.setSSLHandler(sslHandler)
-        }
+            listenerDelegate: listenerDelegate,
+            serviceListenerDeleger: self
+            )
+       
         self.serverService = serverService
         serviceGroup = ServiceGroup(
             services: [serverService],
