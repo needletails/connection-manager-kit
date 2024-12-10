@@ -185,9 +185,8 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
                 }
             }
             await logger.log(level: .info, message: "Finishing Child Channel")
-            try await childChannel.channel.close()
-            await logger.log(level: .info, message: "Is Channel Active: \(childChannel.channel.isActive)")
         }
+        await logger.log(level: .info, message: "Is Channel Active: \(childChannel.channel.isActive)")
     }
     
     func setInboundContinuation(_ continuation: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation, id: String) async {
