@@ -177,6 +177,9 @@ actor ServerChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service 
                 } catch {
                     if let contextDelegate = await contextDelegates[channelId.uuidString] {
                         await contextDelegate.reportChildChannel(error: error)
+                        try await childChannel.executeThenClose { inbound, outbound in
+                            outbound.finish()
+                        }
                     }
                 }
             }
