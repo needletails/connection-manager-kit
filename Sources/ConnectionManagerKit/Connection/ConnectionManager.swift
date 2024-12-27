@@ -17,7 +17,13 @@ public actor ConnectionManager {
     private let group: EventLoopGroup
     let connectionCache = ConnectionCache<ByteBuffer, ByteBuffer>()
     private var serviceGroup: ServiceGroup?
-
+    private var _shouldReconnect = true
+    public var shouldReconnect: Bool {
+        get async {
+            _shouldReconnect
+        }
+    }
+    
     public init() {
         #if canImport(Network)
             self.group = NIOTSEventLoopGroup.singleton
@@ -74,6 +80,7 @@ public actor ConnectionManager {
                     maxAttempts: maxAttempts, 
                     timeout: timeout)
             } else {
+                _shouldReconnect = false
                 // If max attempts reached, rethrow the error
                 throw error
             }
@@ -100,8 +107,7 @@ public actor ConnectionManager {
                 bootstrap.enableTLS()
             }
 
-            return
-                try await client
+            return try await client
                 .connectTimeout(timeout)
                 .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
                 .connect(host: server.host, port: server.port) { channel in
@@ -119,9 +125,8 @@ public actor ConnectionManager {
                 connection = connection.tlsOptions(tlsOptions)
             }
 
-            connection =
-                connection
-                .connectTimeout(.minutes(1))
+            connection = connection
+            .connectTimeout(timeout)
                 .channelOption(
                     ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
 
@@ -166,6 +171,7 @@ public actor ConnectionManager {
         do {
             await serviceGroup?.triggerGracefulShutdown()
             try await connectionCache.removeConnection(cacheKey)
+            print("Gracefully shutdown service and removed connection from cache")
         } catch {
             print("Error shutting down connection group: \(error)")
             await serviceGroup?.triggerGracefulShutdown()

@@ -12,7 +12,7 @@ import Network
 import ServiceLifecycle
 
 actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service {
-    
+
     let config: ServerLocation
     let childChannel: NIOAsyncChannel<Inbound, Outbound>?
     let delegate: ChildChannelServiceDelelgate

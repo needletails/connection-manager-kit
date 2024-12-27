@@ -1,7 +1,13 @@
 import Foundation
 import NIOCore
 import NIOPosix
+import NIOSSL
 import Testing
+#if os(Linux)
+import Glibc
+#else
+import System
+#endif
 
 @testable import ConnectionManagerKit
 
@@ -10,27 +16,26 @@ import Testing
 #endif
 
 final class ListenerDelegation: ListenerDelegate {
-
-    let shouldShutdown: Bool
-    var serverChannel:
-        NIOCore.NIOAsyncChannel<
-            NIOCore.NIOAsyncChannel<NIOCore.ByteBuffer, NIOCore.ByteBuffer>, Never
-        >?
-
-    init(shouldShutdown: Bool) {
-        self.shouldShutdown = shouldShutdown
+    func retrieveSSLHandler() -> NIOSSL.NIOSSLServerHandler? {
+        return nil
     }
 
-    func didBindServer(
-        channel: NIOCore.NIOAsyncChannel<
-            NIOCore.NIOAsyncChannel<NIOCore.ByteBuffer, NIOCore.ByteBuffer>, Never
-        >
-    ) async {
+    
+    func didBindServer<Inbound, Outbound>(channel: NIOCore.NIOAsyncChannel<NIOCore.NIOAsyncChannel<Inbound, Outbound>, Never>) async where Inbound : Sendable, Outbound : Sendable {
         print("DID BIND SERVER", channel.channel)
+        guard let channel = channel as? NIOCore.NIOAsyncChannel<NIOCore.NIOAsyncChannel<ByteBuffer, ByteBuffer>, Never> else { return }
         serverChannel = channel
         if shouldShutdown {
             try! await channel.executeThenClose({ _, _ in })
         }
+    }
+    
+
+    let shouldShutdown: Bool
+    nonisolated(unsafe) var serverChannel: NIOCore.NIOAsyncChannel<NIOCore.NIOAsyncChannel<ByteBuffer, ByteBuffer>, Never>?
+
+    init(shouldShutdown: Bool) {
+        self.shouldShutdown = shouldShutdown
     }
 }
 
@@ -95,6 +100,32 @@ struct ConnectionManagerKitTests {
         try await manager.connect(to: servers)
         serverTask.cancel()
     }
+    
+    @Test func testFailedCreateConnection() async throws {
+        let serverTask = Task {
+            
+                    let manager = ConnectionManager()
+                    let endpoint = "localhost"
+                    let conformer = MockConnectionDelegate(
+                        manager: manager,
+                        listenerDelegation: ListenerDelegation(shouldShutdown: false))
+
+                    let servers = [
+                        ServerLocation(
+                            host: endpoint, port: 6669, enableTLS: false, cacheKey: "s1",
+                            delegate: conformer, contextDelegate: MockChannelContextDelegate())
+                    ]
+                    conformer.servers.append(contentsOf: servers)
+                    try await manager.connect(
+                        to: servers, maxReconnectionAttempts: 0, timeout: .seconds(10))
+                try await Task.sleep(until: .now + .seconds(10))
+
+        }
+        try await Task.sleep(until: .now + .seconds(15))
+        await listener.serviceGroup?.triggerGracefulShutdown()
+        serverTask.cancel()
+    }
+
 
     @Test func testCreateConnectionFailedReconnect() async throws {
         let serverTask = Task {
@@ -229,7 +260,7 @@ final class MockConnectionDelegate: ConnectionDelegate {
     }
 
     nonisolated(unsafe) var servers = [ServerLocation]()
-    nonisolated(unsafe) let listenerDelegation: ListenerDelegation
+    let listenerDelegation: ListenerDelegation
     nonisolated(unsafe) var networkEventTask: Task<Void, Never>?
     nonisolated(unsafe) var inactiveTask: Task<Void, Never>?
     nonisolated(unsafe) var errorTask: Task<Void, Never>?
@@ -282,8 +313,23 @@ final class MockConnectionDelegate: ConnectionDelegate {
                         break
                     case .bindToNWEndpoint(_):
                         break
-                    case .waitingForConnectivity(_):
-                        break
+                    case .waitingForConnectivity(let error):
+                        print("RECEIVED waitingForConnectivity ERROR", error.transientError)
+                        switch error.transientError {
+                        case .posix(let code):
+                            switch code {
+                            case .ECONNREFUSED:
+                               break
+                            default:
+                                break
+                            }
+                        case .dns(let code):
+                            print("RECEIVED DNS CODE", code)
+                        case .tls(let code):
+                            print("RECEIVED TLS CODE", code)
+                        @unknown default:
+                            break
+                        }
                     case .pathChanged(_):
                         break
                     }
@@ -367,11 +413,11 @@ final class MockChannelContextDelegate: ChannelContextDelegate {
     }
 
     func channelInActive(_ stream: AsyncStream<Void>) {
-
+        print("MOCK DELEGATION CHANNEL INACTIVE")
     }
 
     func reportChildChannel(error: any Error) async {
-
+        print("MOCK DELEGATION RECEIVE ERROR", error)
     }
 
     func shutdownChildConfiguration() async {
