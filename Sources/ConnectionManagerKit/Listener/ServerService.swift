@@ -129,12 +129,9 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
         serverChannel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>,
         childChannelCompletion: @Sendable @escaping (NIOAsyncChannel<Inbound, Outbound>) async throws -> Void
     ) async throws {
-        let logger = NeedleTailLogger()
         try await serverChannel.executeThenClose { inbound in
-         await logger.log(level: .info, message: "INBOUND ON SERVER CHANNEL CLOSURE")
             // Create a group for the child channel
             try await withThrowingDiscardingTaskGroup { group in
-            await logger.log(level: .info, message: "IN TASK GROUP")
                 for try await childChannel in inbound.cancelOnGracefulShutdown() {
                     // For each new client that connects to the server, create a new group for that handler
                     group.addTask {
