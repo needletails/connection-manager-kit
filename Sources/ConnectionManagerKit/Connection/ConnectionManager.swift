@@ -32,7 +32,7 @@ public actor ConnectionManager {
     let connectionCache = ConnectionCache<ByteBuffer, ByteBuffer>()
     private var serviceGroup: ServiceGroup?
     nonisolated(unsafe) var shutdownTask: Task<Void, Never>?
-    nonisolated(unsafe) public var handlers: [ChannelHandler] = []
+    nonisolated(unsafe) public var channelHandlers: [ChannelHandler] = []
     private var _shouldReconnect = true
     public var shouldReconnect: Bool {
         get async {
@@ -59,7 +59,6 @@ public actor ConnectionManager {
             
             try await attemptConnection(
                 to: server,
-                handlers: handlers,
                 currentAttempt: 0,
                 maxAttempts: maxReconnectionAttempts,
                 timeout: timeout,
@@ -74,7 +73,6 @@ public actor ConnectionManager {
     
     private func attemptConnection(
         to server: ServerLocation,
-        handlers: [ChannelHandler],
         currentAttempt: Int,
         maxAttempts: Int,
         timeout: TimeAmount,
@@ -84,7 +82,6 @@ public actor ConnectionManager {
             // Attempt to create a connection
             let childChannel = try await createConnection(
                 server: server,
-                handlers: handlers,
                 group: self.group,
                 timeout: timeout,
                 tlsPreKeyed: tlsPreKeyed)
@@ -102,7 +99,6 @@ public actor ConnectionManager {
                 try await Task.sleep(until: .now + .seconds(5))
                 try await attemptConnection(
                     to: server,
-                    handlers: handlers,
                     currentAttempt: currentAttempt + 1,
                     maxAttempts: maxAttempts, 
                     timeout: timeout,
@@ -122,12 +118,11 @@ public actor ConnectionManager {
     /// This is the entry point for creating connections. After we create a connection we cache for retieval later
     private func createConnection(
         server: ServerLocation,
-        handlers: [ChannelHandler],
         group: EventLoopGroup,
         timeout: TimeAmount,
         tlsPreKeyed: TLSPreKeyedConfiguration? = nil
     ) async throws -> NIOAsyncChannel<ByteBuffer, ByteBuffer> {
-        self.handlers = handlers
+
 #if !canImport(Network)
         func socketChannelCreator(tlsPreKeyed: TLSPreKeyedConfiguration? = nil) async throws -> NIOAsyncChannel<ByteBuffer, ByteBuffer> {
             var tlsConfiguration = tlsPreKeyed?.tlsConfiguration
@@ -159,7 +154,7 @@ public actor ConnectionManager {
                     host: server.host,
                     port: server.port) { [weak self] channel in
                         guard let self else { return group.next().makePromise(of: NIOAsyncChannel<ByteBuffer, ByteBuffer>.self).futureResult }
-                    return createHandlers(channel, handlers: self.handlers)
+                    return createHandlers(channel, channelHandlers: self.channelHandlers)
                 }
         }
 #endif
@@ -186,7 +181,7 @@ public actor ConnectionManager {
                 host: server.host,
                 port: server.port) { [weak self] channel in
                     guard let self else { return group.next().makePromise(of: NIOAsyncChannel<ByteBuffer, ByteBuffer>.self).futureResult }
-                    return createHandlers(channel, handlers: self.handlers)
+                    return createHandlers(channel, channelHandlers: self.channelHandlers)
             }
 #else
             return try await socketChannelCreator()
@@ -194,13 +189,13 @@ public actor ConnectionManager {
 
         @Sendable func createHandlers(_
                                       channel: Channel,
-                                      handlers: [ChannelHandler]
+                                      channelHandlers: [ChannelHandler]
         ) -> EventLoopFuture<NIOAsyncChannel<ByteBuffer, ByteBuffer>> {
             
             var handlers = [ChannelHandler]()
             let monitor = NetworkEventMonitor()
             handlers.append(monitor)
-            handlers.append(contentsOf: handlers)
+            handlers.append(contentsOf: channelHandlers)
             
             return channel.eventLoop.makeCompletedFuture {
                 try channel.pipeline.syncOperations.addHandlers(handlers)

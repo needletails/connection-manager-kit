@@ -98,7 +98,7 @@ struct ConnectionManagerKitTests {
         ]
 
         conformer.servers.append(contentsOf: servers)
-        manager.handlers = [LengthFieldPrepender(lengthFieldBitLength: .threeBytes),
+        manager.channelHandlers = [LengthFieldPrepender(lengthFieldBitLength: .threeBytes),
                                       ByteToMessageHandler(
                                         LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes),
                                         maximumBufferSize: 16_777_216
@@ -113,7 +113,7 @@ struct ConnectionManagerKitTests {
         let serverTask = Task {
             
                     let manager = ConnectionManager()
-                    manager.handlers = [LengthFieldPrepender(lengthFieldBitLength: .threeBytes), ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216)]
+                    manager.channelHandlers = [LengthFieldPrepender(lengthFieldBitLength: .threeBytes), ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216)]
                     let endpoint = "localhost"
                     let conformer = MockConnectionDelegate(
                         manager: manager,
@@ -143,7 +143,7 @@ struct ConnectionManagerKitTests {
                 group.addTask {
 
                     let manager = ConnectionManager()
-                    manager.handlers = [LengthFieldPrepender(lengthFieldBitLength: .threeBytes), ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216)]
+                    manager.channelHandlers = [LengthFieldPrepender(lengthFieldBitLength: .threeBytes), ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216)]
                     let endpoint = "localhost"
                     let conformer = MockConnectionDelegate(
                         manager: manager,
@@ -278,7 +278,7 @@ final class MockConnectionDelegate: ConnectionDelegate {
 
     init(manager: ConnectionManager, listenerDelegation: ListenerDelegation) {
         self.manager = manager
-        self.manager.handlers = [LengthFieldPrepender(lengthFieldBitLength: .threeBytes), ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216)]
+        self.manager.channelHandlers = [LengthFieldPrepender(lengthFieldBitLength: .threeBytes), ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216)]
         self.listenerDelegation = listenerDelegation
     }
 
