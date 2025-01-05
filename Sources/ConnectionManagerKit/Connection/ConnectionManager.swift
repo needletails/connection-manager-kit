@@ -26,13 +26,18 @@ public struct TLSPreKeyedConfiguration: Sendable {
 #endif
 }
 
+
+public protocol ConnectionManagerDelegate: AnyObject, Sendable {
+    func retrieveChannelHandlers() -> [ChannelHandler]
+}
+
 public actor ConnectionManager {
 
     private let group: EventLoopGroup
     let connectionCache = ConnectionCache<ByteBuffer, ByteBuffer>()
     private var serviceGroup: ServiceGroup?
     nonisolated(unsafe) var shutdownTask: Task<Void, Never>?
-    nonisolated(unsafe) public var channelHandlers: [ChannelHandler] = []
+    nonisolated(unsafe) public weak var delegate: ConnectionManagerDelegate?
     private var _shouldReconnect = true
     public var shouldReconnect: Bool {
         get async {
@@ -152,9 +157,8 @@ public actor ConnectionManager {
                 .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
                 .connect(
                     host: server.host,
-                    port: server.port) { [weak self] channel in
-                        guard let self else { return group.next().makePromise(of: NIOAsyncChannel<ByteBuffer, ByteBuffer>.self).futureResult }
-                    return createHandlers(channel, channelHandlers: self.channelHandlers)
+                    port: server.port) { channel in
+                    return createHandlers(channel)
                 }
         }
 #endif
@@ -179,26 +183,23 @@ public actor ConnectionManager {
             
             return try await connection.connect(
                 host: server.host,
-                port: server.port) { [weak self] channel in
-                    guard let self else { return group.next().makePromise(of: NIOAsyncChannel<ByteBuffer, ByteBuffer>.self).futureResult }
-                    return createHandlers(channel, channelHandlers: self.channelHandlers)
+                port: server.port) { channel in
+                    return createHandlers(channel)
             }
 #else
             return try await socketChannelCreator()
 #endif
 
-        @Sendable func createHandlers(_
-                                      channel: Channel,
-                                      channelHandlers: [ChannelHandler]
-        ) -> EventLoopFuture<NIOAsyncChannel<ByteBuffer, ByteBuffer>> {
+        @Sendable func createHandlers(_ channel: Channel) -> EventLoopFuture<NIOAsyncChannel<ByteBuffer, ByteBuffer>> {
             
-            var handlers = [ChannelHandler]()
             let monitor = NetworkEventMonitor()
-            handlers.append(monitor)
-            handlers.append(contentsOf: channelHandlers)
             
             return channel.eventLoop.makeCompletedFuture {
-                try channel.pipeline.syncOperations.addHandlers(handlers)
+                
+                try channel.pipeline.syncOperations.addHandler(monitor)
+                if let channelHandlers = delegate?.retrieveChannelHandlers(), !channelHandlers.isEmpty {
+                    try channel.pipeline.syncOperations.addHandlers(channelHandlers)
+                }
 
                 if let errorStream = monitor.errorStream {
                     server.delegate.handleError(errorStream)

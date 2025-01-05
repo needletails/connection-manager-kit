@@ -17,6 +17,10 @@ import System
 #endif
 
 final class ListenerDelegation: ListenerDelegate {
+    func retrieveChannelHandlers() -> [any NIOCore.ChannelHandler] {
+        [LengthFieldPrepender(lengthFieldBitLength: .threeBytes), ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216)]
+    }
+    
     func retrieveSSLHandler() -> NIOSSL.NIOSSLServerHandler? {
         return nil
     }
@@ -40,11 +44,20 @@ final class ListenerDelegation: ListenerDelegate {
     }
 }
 
-struct ConnectionManagerKitTests {
+actor ConnectionManagerKitTests: ConnectionManagerDelegate {
+    nonisolated func retrieveChannelHandlers() -> [any NIOCore.ChannelHandler] {
+        [LengthFieldPrepender(lengthFieldBitLength: .threeBytes), ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216)]
+    }
+    
 
     let listener = ConnectionListener()
     let manager = ConnectionManager()
+    
     let serverGroup = MultiThreadedEventLoopGroup.singleton
+    
+    init() {
+        manager.delegate = self
+    }
 
     @Test func testServerBinding() async throws {
         await #expect(
@@ -98,22 +111,12 @@ struct ConnectionManagerKitTests {
         ]
 
         conformer.servers.append(contentsOf: servers)
-        manager.channelHandlers = [LengthFieldPrepender(lengthFieldBitLength: .threeBytes),
-                                      ByteToMessageHandler(
-                                        LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes),
-                                        maximumBufferSize: 16_777_216
-                                      )]
-
-        try await manager.connect(to: servers)
         try await manager.connect(to: servers)
         serverTask.cancel()
     }
     
     @Test func testFailedCreateConnection() async throws {
         let serverTask = Task {
-            
-                    let manager = ConnectionManager()
-                    manager.channelHandlers = [LengthFieldPrepender(lengthFieldBitLength: .threeBytes), ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216)]
                     let endpoint = "localhost"
                     let conformer = MockConnectionDelegate(
                         manager: manager,
@@ -140,10 +143,7 @@ struct ConnectionManagerKitTests {
         let serverTask = Task {
             try await withThrowingTaskGroup(of: Void.self) { group in
 
-                group.addTask {
-
-                    let manager = ConnectionManager()
-                    manager.channelHandlers = [LengthFieldPrepender(lengthFieldBitLength: .threeBytes), ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216)]
+                group.addTask { [self] in
                     let endpoint = "localhost"
                     let conformer = MockConnectionDelegate(
                         manager: manager,
@@ -160,7 +160,7 @@ struct ConnectionManagerKitTests {
                 }
                 try await Task.sleep(until: .now + .seconds(5))
 
-                group.addTask {
+                group.addTask { [self] in
                     let listenerDelegation = ListenerDelegation(shouldShutdown: false)
                     let serverConformer = MockConnectionDelegate(
                         manager: manager, listenerDelegation: listenerDelegation)
@@ -278,7 +278,6 @@ final class MockConnectionDelegate: ConnectionDelegate {
 
     init(manager: ConnectionManager, listenerDelegation: ListenerDelegation) {
         self.manager = manager
-        self.manager.channelHandlers = [LengthFieldPrepender(lengthFieldBitLength: .threeBytes), ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216)]
         self.listenerDelegation = listenerDelegation
     }
 

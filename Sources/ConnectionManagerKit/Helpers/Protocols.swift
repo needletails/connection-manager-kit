@@ -41,8 +41,10 @@ public protocol ChannelContextDelegate: AnyObject, Sendable {
 public protocol ListenerDelegate: AnyObject, Sendable {
     func didBindServer<Inbound: Sendable, Outbound: Sendable>(channel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>) async
     nonisolated func retrieveSSLHandler() -> NIOSSLServerHandler?
+    nonisolated func retrieveChannelHandlers() -> [ChannelHandler]
 }
 
 protocol ServiceListenerDelegate: AnyObject {
     func retrieveSSLHandler() -> NIOSSLServerHandler?
+    func retrieveChannelHandlers() -> [ChannelHandler]
 }

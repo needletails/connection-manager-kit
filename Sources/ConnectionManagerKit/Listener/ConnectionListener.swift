@@ -25,6 +25,11 @@ public actor ConnectionListener: ServiceListenerDelegate {
         listenerDelegate?.retrieveSSLHandler()
     }
     
+    nonisolated func retrieveChannelHandlers() -> [ChannelHandler] {
+        guard let listenerDelegate else { return [] }
+        return listenerDelegate.retrieveChannelHandlers()
+    }
+    
     public func setContextDelegate(_ delegate: ChannelContextDelegate, key: String) async {
         await serverService?.setContextDelegate(delegate, key: key)
     }

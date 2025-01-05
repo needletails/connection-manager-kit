@@ -81,14 +81,11 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
                     if let sslHandler = self.serviceListenerDelegate?.retrieveSSLHandler() {
                         try channel.pipeline.syncOperations.addHandler(sslHandler)
                     }
-
-                    try channel.pipeline.syncOperations.addHandlers([
-                        LengthFieldPrepender(lengthFieldBitLength: .threeBytes),
-                        ByteToMessageHandler(
-                            LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes),
-                            maximumBufferSize: 16777216
-                        ),
-                    ])
+                    
+                    if let channelHandlers = self.serviceListenerDelegate?.retrieveChannelHandlers(), !channelHandlers.isEmpty {
+                        try channel.pipeline.syncOperations.addHandlers(channelHandlers)
+                    }
+        
                     return try NIOAsyncChannel(wrappingChannelSynchronously: channel)
                 }
         })
