@@ -106,7 +106,6 @@ public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendab
         guard let networkEvent = event as? any NIOTSNetworkEvent else {
             return
         }
-        
         let eventType: NetworkEvent?
         switch networkEvent {
         case let event as NIOTSNetworkEvents.BetterPathAvailable:

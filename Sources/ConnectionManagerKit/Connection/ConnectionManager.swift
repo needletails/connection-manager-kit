@@ -12,11 +12,27 @@ import ServiceLifecycle
     import NIOTransportServices
 #endif
 
+public struct TLSPreKeyedConfiguration: Sendable {
+#if canImport(Network)
+    public let tlsOption: NWProtocolTLS.Options
+    public init(tlsOption: NWProtocolTLS.Options) {
+        self.tlsOption = tlsOption
+    }
+#else
+    public let tlsConfiguration: TLSConfiguration
+    public init(tlsConfiguration: TLSConfiguration) {
+        self.tlsConfiguration = tlsConfiguration
+    }
+#endif
+}
+
 public actor ConnectionManager {
 
     private let group: EventLoopGroup
     let connectionCache = ConnectionCache<ByteBuffer, ByteBuffer>()
     private var serviceGroup: ServiceGroup?
+    nonisolated(unsafe) var shutdownTask: Task<Void, Never>?
+    nonisolated(unsafe) public var handlers: [ChannelHandler] = []
     private var _shouldReconnect = true
     public var shouldReconnect: Bool {
         get async {
@@ -31,37 +47,47 @@ public actor ConnectionManager {
             self.group = MultiThreadedEventLoopGroup.singleton
         #endif
     }
+    
     public func connect(
-        to servers: [ServerLocation], 
+        to servers: [ServerLocation],
         maxReconnectionAttempts: Int = 6,
-        timeout: TimeAmount = .seconds(10)
-        ) async throws
-    {
+        timeout: TimeAmount = .seconds(10),
+        tlsPreKeyed: TLSPreKeyedConfiguration? = nil
+    ) async throws {
 
         for await server in servers.async {
             
             try await attemptConnection(
-                to: server, 
+                to: server,
+                handlers: handlers,
                 currentAttempt: 0,
                 maxAttempts: maxReconnectionAttempts,
-                timeout: timeout)
+                timeout: timeout,
+                tlsPreKeyed: tlsPreKeyed)
         }
-
+        
         serviceGroup = await ServiceGroup(
             services: connectionCache.fetchAllConnections(),
             logger: .init(label: "Connection Manager"))
         try await serviceGroup?.run()
     }
-
+    
     private func attemptConnection(
-        to server: ServerLocation, 
-        currentAttempt: Int, 
+        to server: ServerLocation,
+        handlers: [ChannelHandler],
+        currentAttempt: Int,
         maxAttempts: Int,
-        timeout: TimeAmount
+        timeout: TimeAmount,
+        tlsPreKeyed: TLSPreKeyedConfiguration? = nil
         ) async throws {
         do {
             // Attempt to create a connection
-            let childChannel = try await createConnection(server: server, timeout: timeout)
+            let childChannel = try await createConnection(
+                server: server,
+                handlers: handlers,
+                group: self.group,
+                timeout: timeout,
+                tlsPreKeyed: tlsPreKeyed)
             await connectionCache.cacheConnection(
                 .init(
                     config: server,
@@ -75,10 +101,12 @@ public actor ConnectionManager {
                 // Recursively attempt to connect again
                 try await Task.sleep(until: .now + .seconds(5))
                 try await attemptConnection(
-                    to: server, 
-                    currentAttempt: currentAttempt + 1, 
+                    to: server,
+                    handlers: handlers,
+                    currentAttempt: currentAttempt + 1,
                     maxAttempts: maxAttempts, 
-                    timeout: timeout)
+                    timeout: timeout,
+                    tlsPreKeyed: tlsPreKeyed)
             } else {
                 _shouldReconnect = false
                 // If max attempts reached, rethrow the error
@@ -86,14 +114,31 @@ public actor ConnectionManager {
             }
         }
     }
-
+    
+    enum Errors: Error {
+        case tlsNotConfigured
+    }
+    
     /// This is the entry point for creating connections. After we create a connection we cache for retieval later
-    private func createConnection(server: ServerLocation, timeout: TimeAmount) async throws -> NIOAsyncChannel<ByteBuffer, ByteBuffer> {
-        func socketChannelCreator() async throws -> NIOAsyncChannel<ByteBuffer, ByteBuffer> {
-            var config = TLSConfiguration.makeClientConfiguration()
-            config.minimumTLSVersion = .tlsv13
-            config.maximumTLSVersion = .tlsv13
-            let sslContext = try NIOSSLContext(configuration: config)
+    private func createConnection(
+        server: ServerLocation,
+        handlers: [ChannelHandler],
+        group: EventLoopGroup,
+        timeout: TimeAmount,
+        tlsPreKeyed: TLSPreKeyedConfiguration? = nil
+    ) async throws -> NIOAsyncChannel<ByteBuffer, ByteBuffer> {
+        self.handlers = handlers
+#if !canImport(Network)
+        func socketChannelCreator(tlsPreKeyed: TLSPreKeyedConfiguration? = nil) async throws -> NIOAsyncChannel<ByteBuffer, ByteBuffer> {
+            var tlsConfiguration = tlsPreKeyed.tlsConfiguration
+            if tlsPreKeyed == nil {
+                tlsConfiguration = TLSConfiguration.makeClientConfiguration()
+                tlsConfiguration?.minimumTLSVersion = .tlsv13
+                tlsConfiguration?.maximumTLSVersion = .tlsv13
+            }
+            guard let tlsConfiguration = tlsConfiguration else { throw Errors.tlsNotConfigured }
+            
+            let sslContext = try NIOSSLContext(configuration: tlsConfiguration)
             let client = ClientBootstrap(group: group)
             let bootstrap = try NIOClientTCPBootstrap(
                 client,
@@ -106,49 +151,60 @@ public actor ConnectionManager {
             if server.enableTLS {
                 bootstrap.enableTLS()
             }
-
+            
             return try await client
                 .connectTimeout(timeout)
                 .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
-                .connect(host: server.host, port: server.port) { channel in
-                    return createHandlers(channel)
+                .connect(
+                    host: server.host,
+                    port: server.port) { [weak self] channel in
+                        guard let self else { return group.next().makePromise(of: NIOAsyncChannel<ByteBuffer, ByteBuffer>.self).futureResult }
+                    return createHandlers(channel, handlers: self.handlers)
                 }
         }
+#endif
 
-        #if canImport(Network)
+#if canImport(Network)
             var connection = NIOTSConnectionBootstrap(group: group)
             let tcpOptions = NWProtocolTCP.Options()
             connection = connection.tcpOptions(tcpOptions)
 
             if server.enableTLS {
-                let tlsOptions = NWProtocolTLS.Options()
-                connection = connection.tlsOptions(tlsOptions)
+                if let tlsPreKeyed {
+                    connection = connection.tlsOptions(tlsPreKeyed.tlsOption)
+                } else {
+                    let tlsOptions = NWProtocolTLS.Options()
+                    connection = connection.tlsOptions(tlsOptions)
+                }
             }
 
             connection = connection
             .connectTimeout(timeout)
-                .channelOption(
-                    ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
-
-            return try await connection.connect(host: server.host, port: server.port) { channel in
-                return createHandlers(channel)
+            .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
+            
+            return try await connection.connect(
+                host: server.host,
+                port: server.port) { [weak self] channel in
+                    guard let self else { return group.next().makePromise(of: NIOAsyncChannel<ByteBuffer, ByteBuffer>.self).futureResult }
+                    return createHandlers(channel, handlers: self.handlers)
             }
-        #else
+#else
             return try await socketChannelCreator()
-        #endif
+#endif
 
-        @Sendable func createHandlers(_ channel: Channel) -> EventLoopFuture<NIOAsyncChannel<ByteBuffer, ByteBuffer>> {
+        @Sendable func createHandlers(_
+                                      channel: Channel,
+                                      handlers: [ChannelHandler]
+        ) -> EventLoopFuture<NIOAsyncChannel<ByteBuffer, ByteBuffer>> {
+            
+            var handlers = [ChannelHandler]()
             let monitor = NetworkEventMonitor()
+            handlers.append(monitor)
+            handlers.append(contentsOf: handlers)
+            
             return channel.eventLoop.makeCompletedFuture {
-                try channel.pipeline.syncOperations.addHandlers([
-                    monitor,
-                    LengthFieldPrepender(lengthFieldBitLength: .threeBytes),
-                    ByteToMessageHandler(
-                        LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes),
-                        maximumBufferSize: 16_777_216
-                    ),
-                ])
-                //IS THIS THE CORRECT SPOT?
+                try channel.pipeline.syncOperations.addHandlers(handlers)
+
                 if let errorStream = monitor.errorStream {
                     server.delegate.handleError(errorStream)
                 }

@@ -2,6 +2,7 @@ import Foundation
 import NIOCore
 import NIOPosix
 import NIOSSL
+import NIOExtras
 import Testing
 #if os(Linux)
 import Glibc
@@ -97,6 +98,13 @@ struct ConnectionManagerKitTests {
         ]
 
         conformer.servers.append(contentsOf: servers)
+        manager.handlers = [LengthFieldPrepender(lengthFieldBitLength: .threeBytes),
+                                      ByteToMessageHandler(
+                                        LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes),
+                                        maximumBufferSize: 16_777_216
+                                      )]
+
+        try await manager.connect(to: servers)
         try await manager.connect(to: servers)
         serverTask.cancel()
     }
@@ -105,6 +113,7 @@ struct ConnectionManagerKitTests {
         let serverTask = Task {
             
                     let manager = ConnectionManager()
+                    manager.handlers = [LengthFieldPrepender(lengthFieldBitLength: .threeBytes), ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216)]
                     let endpoint = "localhost"
                     let conformer = MockConnectionDelegate(
                         manager: manager,
@@ -134,6 +143,7 @@ struct ConnectionManagerKitTests {
                 group.addTask {
 
                     let manager = ConnectionManager()
+                    manager.handlers = [LengthFieldPrepender(lengthFieldBitLength: .threeBytes), ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216)]
                     let endpoint = "localhost"
                     let conformer = MockConnectionDelegate(
                         manager: manager,
@@ -268,12 +278,13 @@ final class MockConnectionDelegate: ConnectionDelegate {
 
     init(manager: ConnectionManager, listenerDelegation: ListenerDelegation) {
         self.manager = manager
+        self.manager.handlers = [LengthFieldPrepender(lengthFieldBitLength: .threeBytes), ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216)]
         self.listenerDelegation = listenerDelegation
     }
 
     func configureChildChannel() async {}
 
-    func shutdownChildConfiguration() async {}
+    func didShutdownChildChannel() async {}
 
     #if canImport(Network)
         func handleError(_ stream: AsyncStream<NWError>) {
@@ -388,7 +399,7 @@ final class MockConnectionDelegate: ConnectionDelegate {
         }
     }
 
-    func reportChildChannel(error: any Error) async {
+    func reportChildChannel(error: any Error, id: String) async {
 
     }
 
@@ -416,11 +427,11 @@ final class MockChannelContextDelegate: ChannelContextDelegate {
         print("MOCK DELEGATION CHANNEL INACTIVE")
     }
 
-    func reportChildChannel(error: any Error) async {
+    func reportChildChannel(error: any Error, id: String) async {
         print("MOCK DELEGATION RECEIVE ERROR", error)
     }
 
-    func shutdownChildConfiguration() async {
+    func didShutdownChildChannel() async {
 
     }
 

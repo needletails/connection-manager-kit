@@ -14,15 +14,16 @@ import NeedleTailLogger
 
 actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
     
-    let address: SocketAddress
-    let configuration: Configuration
-    let delegate: ChildChannelServiceDelelgate
-    let logger: NeedleTailLogger
-    var contextDelegates: [String: ChannelContextDelegate] = [:]
-    var inboundContinuation: [String: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation] = [:]
-    var outboundContinuation: [String: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation] = [:]
-    weak var listenerDelegate: ListenerDelegate?
-    nonisolated(unsafe) weak var serviceListenerDeleger: ServiceListenerDelegate?
+    private let address: SocketAddress
+    private let configuration: Configuration
+    private let delegate: ChildChannelServiceDelelgate
+    private let logger: NeedleTailLogger
+    private var contextDelegates: [String: ChannelContextDelegate] = [:]
+    private var inboundContinuations: [String: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation] = [:]
+    private var outboundContinuations: [String: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation] = [:]
+    private weak var listenerDelegate: ListenerDelegate?
+    nonisolated(unsafe) private weak var serviceListenerDelegate: ServiceListenerDelegate?
+    nonisolated(unsafe) private var serverChannel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>?
 
     public func setContextDelegate(_ contextDelegate: ChannelContextDelegate, key: String) async {
         self.contextDelegates[key] = contextDelegate
@@ -34,14 +35,14 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
         logger: NeedleTailLogger,
         delegate: ChildChannelServiceDelelgate,
         listenerDelegate: ListenerDelegate?,
-        serviceListenerDeleger: ServiceListenerDelegate?
+        serviceListenerDelegate: ServiceListenerDelegate?
     ) {
         self.address = address
         self.configuration = configuration
         self.logger = logger
         self.delegate = delegate
         self.listenerDelegate = listenerDelegate
-        self.serviceListenerDeleger = serviceListenerDeleger
+        self.serviceListenerDelegate = serviceListenerDelegate
     }
     
     func run() async throws {
@@ -50,6 +51,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
     
     nonisolated func executeTask() async throws {
         let serverChannel = try await bindServer(address: address, configuration: configuration)
+        self.serverChannel = serverChannel
         let serverChannelInTaskGroup = try await encapsulatedServerChannelInTaskGroup(serverChannel: serverChannel)
         await self.listenerDelegate?.didBindServer(channel: serverChannel)
         try await handleChildTaskGroup(serverChannel: serverChannelInTaskGroup) { childChannel in
@@ -76,7 +78,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
             .bind(to: address, childChannelInitializer: { channel in
                 return channel.eventLoop.makeCompletedFuture {
                     
-                    if let sslHandler = self.serviceListenerDeleger?.retrieveSSLHandler() {
+                    if let sslHandler = self.serviceListenerDelegate?.retrieveSSLHandler() {
                         try channel.pipeline.syncOperations.addHandler(sslHandler)
                     }
 
@@ -143,11 +145,24 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
     }
     
     func shutdownChildChannel(id: String) async {
-        self.inboundContinuation[id]?.finish()
-        self.outboundContinuation[id]?.finish()
-        self.inboundContinuation.removeValue(forKey: id)
-        self.outboundContinuation.removeValue(forKey: id)
+        self.inboundContinuations[id]?.finish()
+        self.outboundContinuations[id]?.finish()
+        self.inboundContinuations.removeValue(forKey: id)
+        self.outboundContinuations.removeValue(forKey: id)
         contextDelegates.removeValue(forKey: id)
+    }
+    
+    func shutdown() async throws {
+        for continuation in inboundContinuations {
+            continuation.value.finish()
+        }
+        for continuation in outboundContinuations {
+            continuation.value.finish()
+        }
+        inboundContinuations.removeAll()
+        outboundContinuations.removeAll()
+        contextDelegates.removeAll()
+        try await serverChannel?.executeThenClose({_,_ in })
     }
     
     
@@ -210,14 +225,14 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
                         inboundContinuation.finish()
                         outboundContinuation.finish()
                         if let contextDelegate = await contextDelegates[channelId.uuidString] {
-                            await contextDelegate.shutdownChildConfiguration()
+                            await contextDelegate.didShutdownChildChannel()
                         }
                         return
                     }
                     
                 } catch {
                     if let contextDelegate = await contextDelegates[channelId.uuidString] {
-                        await contextDelegate.reportChildChannel(error: error)
+                        await contextDelegate.reportChildChannel(error: error, id: channelId.uuidString)
                     }
                 }
             }
@@ -225,10 +240,10 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
     }
     
     func setInboundContinuation(_ continuation: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation, id: String) async {
-        self.inboundContinuation[id] = continuation
+        self.inboundContinuations[id] = continuation
     }
     
     func setOutboundContinuation(_ continuation: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation, id: String) async {
-        self.outboundContinuation[id] = continuation
+        self.outboundContinuations[id] = continuation
     }
 }

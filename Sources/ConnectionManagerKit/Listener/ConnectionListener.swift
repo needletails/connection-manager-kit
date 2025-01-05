@@ -20,11 +20,11 @@ public actor ConnectionListener: ServiceListenerDelegate {
     nonisolated(unsafe) public var listenerDelegate: ListenerDelegate?
     var serverService: ServerService<ByteBuffer, ByteBuffer>?
     let logger: NeedleTailLogger
-
+    
     nonisolated func retrieveSSLHandler() -> NIOSSL.NIOSSLServerHandler? {
         listenerDelegate?.retrieveSSLHandler()
     }
-
+    
     public func setContextDelegate(_ delegate: ChannelContextDelegate, key: String) async {
         await serverService?.setContextDelegate(delegate, key: key)
     }
@@ -65,16 +65,15 @@ public actor ConnectionListener: ServiceListenerDelegate {
     ) async throws {
         self.delegate = delegate
         self.listenerDelegate = listenerDelegate
-       
+        
         let serverService = ServerService<ByteBuffer, ByteBuffer>(
             address: address,
             configuration: configuration,
             logger: logger,
             delegate: self,
             listenerDelegate: listenerDelegate,
-            serviceListenerDeleger: self
-            )
-       
+            serviceListenerDelegate: self)
+        
         self.serverService = serverService
         serviceGroup = ServiceGroup(
             services: [serverService],
@@ -84,6 +83,10 @@ public actor ConnectionListener: ServiceListenerDelegate {
     
     public func shutdownChildChannel(id: String) async {
         await serverService?.shutdownChildChannel(id: id)
+    }
+    
+    public func shutdown() async throws {
+        try await serverService?.shutdown()
     }
 }
 
