@@ -130,7 +130,7 @@ public actor ConnectionManager {
         self.handlers = handlers
 #if !canImport(Network)
         func socketChannelCreator(tlsPreKeyed: TLSPreKeyedConfiguration? = nil) async throws -> NIOAsyncChannel<ByteBuffer, ByteBuffer> {
-            var tlsConfiguration = tlsPreKeyed.tlsConfiguration
+            var tlsConfiguration = tlsPreKeyed?.tlsConfiguration
             if tlsPreKeyed == nil {
                 tlsConfiguration = TLSConfiguration.makeClientConfiguration()
                 tlsConfiguration?.minimumTLSVersion = .tlsv13
