@@ -19,6 +19,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
     private let delegate: ChildChannelServiceDelelgate
     private let logger: NeedleTailLogger
     private var contextDelegates: [String: ChannelContextDelegate] = [:]
+    private var channelContexts = [ChannelContext<Inbound, Outbound>]()
     private var inboundContinuations: [String: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation] = [:]
     private var outboundContinuations: [String: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation] = [:]
     private weak var listenerDelegate: ListenerDelegate?
@@ -141,15 +142,41 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
         }
     }
     
+    private func stopTLS(from id: String) async {
+        if let childChannel = self.channelContexts.first(where: { $0.id == id })?.channel {
+            let stopPromise: EventLoopPromise<Void> = childChannel.channel.eventLoop.makePromise()
+            do {
+                let tlsHandler = try await childChannel.channel.pipeline.handler(type: NIOSSLServerHandler.self).get()
+                tlsHandler.stopTLS(promise: stopPromise)
+                stopPromise.futureResult.whenComplete { result in
+                    switch result {
+                    case .success(_):
+                        stopPromise.succeed()
+                    case .failure(let error):
+                        stopPromise.fail(error)
+                    }
+                }
+            } catch {
+                stopPromise.fail(error)
+                await logger.log(level: .error, message: "There was a problem stopping TLS\(error)")
+            }
+        }
+    }
+    
     func shutdownChildChannel(id: String) async {
+        await self.stopTLS(from: id)
         self.inboundContinuations[id]?.finish()
         self.outboundContinuations[id]?.finish()
         self.inboundContinuations.removeValue(forKey: id)
         self.outboundContinuations.removeValue(forKey: id)
-        contextDelegates.removeValue(forKey: id)
+        self.channelContexts.removeAll(where: { $0.id == id })
+        self.contextDelegates.removeValue(forKey: id)
     }
     
     func shutdown() async throws {
+        for context in channelContexts {
+            await stopTLS(from: context.id)
+        }
         for continuation in inboundContinuations {
             continuation.value.finish()
         }
@@ -159,6 +186,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
         inboundContinuations.removeAll()
         outboundContinuations.removeAll()
         contextDelegates.removeAll()
+        channelContexts.removeAll()
         try await serverChannel?.executeThenClose({_,_ in })
     }
     
@@ -171,6 +199,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
                     let channelContext = ChannelContext(
                         id: channelId.uuidString,
                         channel: childChannel)
+                    await appendContext(channelContext)
                     await delegate.initializedChildChannel(channelContext)
                     
                     let (_outbound, outboundContinuation) = AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.makeStream()
@@ -234,6 +263,10 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
                 }
             }
         }
+    }
+    
+    func appendContext(_ context: ChannelContext<Inbound, Outbound>) async {
+        self.channelContexts.append(context)
     }
     
     func setInboundContinuation(_ continuation: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation, id: String) async {
