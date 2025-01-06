@@ -19,6 +19,7 @@ import NIOTransportServices
 public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendable {
     public typealias InboundIn = ByteBuffer
     
+    public let connectionIdentfier: String
     private let didSetError = ManagedAtomic(false)
 #if canImport(Network)
     var errorStream: AsyncStream<NWError>?
@@ -37,7 +38,8 @@ public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendab
     private var channelInActiveContinuation: AsyncStream<Void>.Continuation?
 
     
-    init() {
+    init(connectionIdentifier: String) {
+        self.connectionIdentfier = connectionIdentifier
 #if canImport(Network)
         errorStream = AsyncStream<NWError>(bufferingPolicy: .bufferingNewest(1)) { continuation in
             self.errorContinuation = continuation

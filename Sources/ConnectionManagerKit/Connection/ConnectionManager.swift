@@ -184,16 +184,16 @@ public actor ConnectionManager {
             return try await connection.connect(
                 host: server.host,
                 port: server.port) { channel in
-                    return createHandlers(channel)
+                    return createHandlers(channel, server: server)
             }
 #else
             return try await socketChannelCreator()
 #endif
 
-        @Sendable func createHandlers(_ channel: Channel) -> EventLoopFuture<NIOAsyncChannel<ByteBuffer, ByteBuffer>> {
+        @Sendable func createHandlers(_ channel: Channel, server: ServerLocation) -> EventLoopFuture<NIOAsyncChannel<ByteBuffer, ByteBuffer>> {
             
-            let monitor = NetworkEventMonitor()
-            
+            let monitor = NetworkEventMonitor(connectionIdentifier: server.cacheKey)
+
             return channel.eventLoop.makeCompletedFuture {
                 
                 try channel.pipeline.syncOperations.addHandler(monitor)
@@ -202,16 +202,16 @@ public actor ConnectionManager {
                 }
 
                 if let errorStream = monitor.errorStream {
-                    server.delegate.handleError(errorStream)
+                    server.delegate.handleError(errorStream, id: monitor.connectionIdentfier)
                 }
                 if let eventStream = monitor.eventStream {
-                    server.delegate.handleNetworkEvents(eventStream)
+                    server.delegate.handleNetworkEvents(eventStream, id: monitor.connectionIdentfier)
                 }
                 if let channelActiveStream = monitor.channelActiveStream {
-                    server.contextDelegate.channelActive(channelActiveStream)
+                    server.contextDelegate.channelActive(channelActiveStream, id: monitor.connectionIdentfier)
                 }
                 if let channelInActiveStream = monitor.channelInActiveStream {
-                    server.contextDelegate.channelInActive(channelInActiveStream)
+                    server.contextDelegate.channelInActive(channelInActiveStream, id: monitor.connectionIdentfier)
                 }
                 return try NIOAsyncChannel<ByteBuffer, ByteBuffer>(
                     wrappingChannelSynchronously: channel)

@@ -14,8 +14,8 @@ extension ConnectionManager: ChildChannelServiceDelelgate {
     }
     
     nonisolated func shutdown(location: ServerLocation) {
-        if let shutdownTask = shutdownTask {
-            shutdownTask.cancel()
+        if shutdownTask != nil {
+            shutdownTask?.cancel()
             self.shutdownTask = nil
         }
         shutdownTask = Task { [weak self] in

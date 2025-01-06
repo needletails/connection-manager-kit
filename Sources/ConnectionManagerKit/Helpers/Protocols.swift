@@ -18,18 +18,18 @@ protocol ChildChannelServiceDelelgate: Sendable {
 
 public protocol ConnectionDelegate: AnyObject, Sendable {
 #if canImport(Network)
-    func handleError(_ stream: AsyncStream<NWError>)
-    func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>)
+    func handleError(_ stream: AsyncStream<NWError>, id: String)
+    func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>, id: String)
 #else
-    func handleError(_ stream: AsyncStream<IOError>)
-    func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NIOEvent>)
+    func handleError(_ stream: AsyncStream<IOError>, id: String)
+    func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NIOEvent>, id: String)
 #endif
     func initializedChildChannel<Outbound, Inbound>(_ context: ChannelContext<Inbound, Outbound>) async where Outbound : Sendable, Inbound : Sendable
 }
 
 public protocol ChannelContextDelegate: AnyObject, Sendable {
-    func channelActive(_ stream: AsyncStream<Void>)
-    func channelInActive(_ stream: AsyncStream<Void>)
+    func channelActive(_ stream: AsyncStream<Void>, id: String)
+    func channelInActive(_ stream: AsyncStream<Void>, id: String)
     func reportChildChannel(error: any Error, id: String) async
     func didShutdownChildChannel() async
     func deliverWriter<Outbound, Inbound>(context: WriterContext<Inbound, Outbound>) async
