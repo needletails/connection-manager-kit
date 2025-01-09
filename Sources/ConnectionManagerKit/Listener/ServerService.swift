@@ -65,7 +65,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
             }
         }
     }
-
+    
     func bindServer(
         address: SocketAddress,
         configuration: Configuration
@@ -158,7 +158,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
                 }
             } catch {
                 stopPromise.fail(error)
-                await logger.log(level: .error, message: "There was a problem stopping TLS\(error)")
+                await logger.log(level: .trace, message: "There was a problem stopping TLS \(error)")
             }
         }
     }
