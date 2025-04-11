@@ -11,15 +11,21 @@ import Network
 #endif
 import ServiceLifecycle
 
-actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service {
+public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service {
 
-    let config: ServerLocation
+    public var config: ServerLocation
     let childChannel: NIOAsyncChannel<Inbound, Outbound>?
     let delegate: ChildChannelServiceDelelgate
     private var connectionDelegate: ConnectionDelegate?
     private var contextDelegate: ChannelContextDelegate?
     var continuation: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation?
     var inboundContinuation: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation?
+    
+    public func setConfig(_ config: ServerLocation) async {
+        self.config = config
+        self.contextDelegate = config.contextDelegate
+        self.connectionDelegate = config.delegate
+    }
     
     init(
         config: ServerLocation,
@@ -33,6 +39,7 @@ actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service {
         self.contextDelegate = config.contextDelegate
     }
     
+    public
     func run() async throws {
         try await exectuteTask()
     }
@@ -43,7 +50,7 @@ actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service {
             try await childChannel.executeThenClose { [weak self] inbound, outbound in
                 guard let self else { return }
                 
-                let channelId = config.cacheKey
+                let channelId = await config.cacheKey
                 let channelContext = ChannelContext<Inbound, Outbound>(
                     id: channelId,
                     channel: childChannel

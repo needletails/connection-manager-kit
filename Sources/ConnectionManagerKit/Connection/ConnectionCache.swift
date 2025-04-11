@@ -56,6 +56,11 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
         }
     }
     
+    // Remove all connections
+    func removeAllConnection() async throws {
+        connections.removeAll()
+    }
+    
     // Fetch all connections as an array
     func fetchAllConnections() -> [ChildChannelService<Inbound, Outbound>] {
         return Array(connections.values)

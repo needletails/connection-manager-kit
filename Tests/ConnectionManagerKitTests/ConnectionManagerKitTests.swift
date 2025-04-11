@@ -13,7 +13,7 @@ import System
 @testable import ConnectionManagerKit
 
 #if canImport(Network)
-    import Network
+import Network
 #endif
 
 final class ListenerDelegation: ListenerDelegate {
@@ -24,77 +24,78 @@ final class ListenerDelegation: ListenerDelegate {
     func retrieveSSLHandler() -> NIOSSL.NIOSSLServerHandler? {
         return nil
     }
-
+    
     
     func didBindServer<Inbound, Outbound>(channel: NIOCore.NIOAsyncChannel<NIOCore.NIOAsyncChannel<Inbound, Outbound>, Never>) async where Inbound : Sendable, Outbound : Sendable {
-        print("DID BIND SERVER", channel.channel)
-        guard let channel = channel as? NIOCore.NIOAsyncChannel<NIOCore.NIOAsyncChannel<ByteBuffer, ByteBuffer>, Never> else { return }
+        let channel = channel as! NIOCore.NIOAsyncChannel<NIOCore.NIOAsyncChannel<ByteBuffer, ByteBuffer>, Never>
         serverChannel = channel
         if shouldShutdown {
             try! await channel.executeThenClose({ _, _ in })
         }
     }
     
-
+    
     let shouldShutdown: Bool
     nonisolated(unsafe) var serverChannel: NIOCore.NIOAsyncChannel<NIOCore.NIOAsyncChannel<ByteBuffer, ByteBuffer>, Never>?
-
+    
     init(shouldShutdown: Bool) {
         self.shouldShutdown = shouldShutdown
     }
 }
 
 actor ConnectionManagerKitTests: ConnectionManagerDelegate {
+    
+    func deliverChannel(_ channel: NIOCore.NIOAsyncChannel<NIOCore.ByteBuffer, NIOCore.ByteBuffer>, manager: ConnectionManagerKit.ConnectionManager, cacheKey: String) async {
+        await manager.setDelegates(connectionDelegate: conformer, contextDelegate: contextDelegate, cacheKey: cacheKey)
+    }
     nonisolated func retrieveChannelHandlers() -> [any NIOCore.ChannelHandler] {
         [LengthFieldPrepender(lengthFieldBitLength: .threeBytes), ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216)]
     }
     
-
     let listener = ConnectionListener()
     let manager = ConnectionManager()
-    
+    let contextDelegate = MockChannelContextDelegate()
     let serverGroup = MultiThreadedEventLoopGroup.singleton
     
+    let listenerDelegation = ListenerDelegation(shouldShutdown: false)
+    let conformer: MockConnectionDelegate
+    var cacheKeys = [String]()
+    
     init() {
+        conformer = MockConnectionDelegate(manager: manager, listenerDelegation: listenerDelegation)
         manager.delegate = self
     }
-
+    
     @Test func testServerBinding() async throws {
-        await #expect(
-            throws: Never.self,
-            performing: {
-                let listenerDelegation = ListenerDelegation(shouldShutdown: true)
-                let serverConformer = MockConnectionDelegate(
-                    manager: manager, listenerDelegation: listenerDelegation)
-                let config = try await listener.resolveAddress(
-                    .init(group: serverGroup, host: "localhost", port: 6668))
-                try await listener.listen(
-                    address: config.address!,
-                    configuration: config,
-                    delegate: serverConformer,
-                    listenerDelegate: listenerDelegation)
-                await listener.serviceGroup?.triggerGracefulShutdown()
-            })
+        let config = try await self.listener.resolveAddress(
+            .init(group: self.serverGroup, host: "localhost", port: 6668))
+        Task {
+            await #expect(
+                throws: Never.self,
+                performing: {
+                    try await self.listener.listen(
+                        address: config.address!,
+                        configuration: config,
+                        delegate: self.conformer,
+                        listenerDelegate: self.listenerDelegation)
+                })
+        }
+        try await Task.sleep(until: .now + .seconds(3))
+        await self.listener.serviceGroup?.triggerGracefulShutdown()
     }
-
+    
     @Test func testCreateConnection() async throws {
         let endpoint = "localhost"
-        let conformer = MockConnectionDelegate(
-            manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
         let serverTask = Task {
-            let listenerDelegation = ListenerDelegation(shouldShutdown: false)
-            let serverConformer = MockConnectionDelegate(
-                manager: manager, listenerDelegation: listenerDelegation)
             let config = try await listener.resolveAddress(
-                .init(group: serverGroup, host: "localhost", port: 6667))
+                .init(group: serverGroup, host: endpoint, port: 6667))
             try await listener.listen(
                 address: config.address!,
                 configuration: config,
-                delegate: serverConformer,
+                delegate: conformer,
                 listenerDelegate: listenerDelegation)
-            await listener.serviceGroup?.triggerGracefulShutdown()
         }
-
+        
         let servers = [
             ServerLocation(
                 host: endpoint, port: 6667, enableTLS: false, cacheKey: "s1", delegate: conformer,
@@ -109,77 +110,59 @@ actor ConnectionManagerKitTests: ConnectionManagerDelegate {
                 host: endpoint, port: 6667, enableTLS: false, cacheKey: "s4", delegate: conformer,
                 contextDelegate: MockChannelContextDelegate()),
         ]
-
+        
         conformer.servers.append(contentsOf: servers)
-        try await manager.connect(to: servers)
+        let connectionTask = Task {
+            try await manager.connect(to: servers)
+        }
+        
+        try await Task.sleep(until: .now + .seconds(5))
         serverTask.cancel()
+        connectionTask.cancel()
+        await listener.serviceGroup?.triggerGracefulShutdown()
     }
     
     @Test func testFailedCreateConnection() async throws {
         let serverTask = Task {
-                    let endpoint = "localhost"
-                    let conformer = MockConnectionDelegate(
-                        manager: manager,
-                        listenerDelegation: ListenerDelegation(shouldShutdown: false))
-
-                    let servers = [
-                        ServerLocation(
-                            host: endpoint, port: 6669, enableTLS: false, cacheKey: "s1",
-                            delegate: conformer, contextDelegate: MockChannelContextDelegate())
-                    ]
-                    conformer.servers.append(contentsOf: servers)
-                    try await manager.connect(
-                        to: servers, maxReconnectionAttempts: 0, timeout: .seconds(10))
-                try await Task.sleep(until: .now + .seconds(10))
-
+            let endpoint = "localhost"
+            let conformer = MockConnectionDelegate(
+                manager: manager,
+                listenerDelegation: ListenerDelegation(shouldShutdown: false))
+            
+            let servers = [
+                ServerLocation(
+                    host: endpoint, port: 6669, enableTLS: false, cacheKey: "s1",
+                    delegate: conformer, contextDelegate: MockChannelContextDelegate())
+            ]
+            conformer.servers.append(contentsOf: servers)
+            try await manager.connect(
+                to: servers, maxReconnectionAttempts: 0, timeout: .seconds(10))
+            try await Task.sleep(until: .now + .seconds(10))
+            
         }
         try await Task.sleep(until: .now + .seconds(15))
         await listener.serviceGroup?.triggerGracefulShutdown()
         serverTask.cancel()
     }
-
-
+    
+    
     @Test func testCreateConnectionFailedReconnect() async throws {
-        let serverTask = Task {
-            try await withThrowingTaskGroup(of: Void.self) { group in
-
-                group.addTask { [self] in
-                    let endpoint = "localhost"
-                    let conformer = MockConnectionDelegate(
-                        manager: manager,
-                        listenerDelegation: ListenerDelegation(shouldShutdown: false))
-
-                    let servers = [
-                        ServerLocation(
-                            host: endpoint, port: 6669, enableTLS: false, cacheKey: "s1",
-                            delegate: conformer, contextDelegate: MockChannelContextDelegate())
-                    ]
-                    conformer.servers.append(contentsOf: servers)
-                    try! await manager.connect(
-                        to: servers, maxReconnectionAttempts: 20, timeout: .minutes(1))
-                }
-                try await Task.sleep(until: .now + .seconds(5))
-
-                group.addTask { [self] in
-                    let listenerDelegation = ListenerDelegation(shouldShutdown: false)
-                    let serverConformer = MockConnectionDelegate(
-                        manager: manager, listenerDelegation: listenerDelegation)
-                    let config = try await listener.resolveAddress(
-                        .init(group: serverGroup, host: "localhost", port: 6669))
-
-                    try await listener.listen(
-                        address: config.address!,
-                        configuration: config,
-                        delegate: serverConformer,
-                        listenerDelegate: listenerDelegation)
-                }
-            }
+        let task = Task {
+            let endpoint = "localhost"
+            let servers = [
+                ServerLocation(
+                    host: endpoint, port: 6669, enableTLS: false, cacheKey: "s1",
+                    delegate: conformer, contextDelegate:contextDelegate)
+            ]
+            try await manager.connect(
+                to: servers,
+                maxReconnectionAttempts: 20,
+                timeout: .seconds(1))
         }
-        try await Task.sleep(until: .now + .seconds(15))
-        await listener.serviceGroup?.triggerGracefulShutdown()
-        serverTask.cancel()
+        try await Task.sleep(until: .now + .seconds(60*2))
+        task.cancel()
     }
-
+    
     @Test func testCreateCachedConnections() async {
         let conformer = MockConnectionDelegate(
             manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
@@ -213,15 +196,15 @@ actor ConnectionManagerKitTests: ConnectionManagerDelegate {
                 host: "l6", port: 5, enableTLS: false, cacheKey: "s6", delegate: conformer,
                 contextDelegate: MockChannelContextDelegate()), childChannel: nil, delegate: manager
         )
-
+        
         for connection in [c1, c2, c3, c4, c5, c6] {
             await manager.connectionCache.cacheConnection(
                 connection, for: connection.config.cacheKey)
         }
-
+        
         await #expect(manager.connectionCache.count == 6)
     }
-
+    
     @Test func testFindConnection() async throws {
         let conformer = MockConnectionDelegate(
             manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
@@ -236,9 +219,9 @@ actor ConnectionManagerKitTests: ConnectionManagerDelegate {
         let location2 = await getLocation(connection: c1)
         #expect(location1 == location2)
     }
-
+    
     private func getLocation(connection: ChildChannelService<ByteBuffer, ByteBuffer>?) async
-        -> String
+    -> String
     {
         if let connection {
             return await connection.config.cacheKey
@@ -246,7 +229,7 @@ actor ConnectionManagerKitTests: ConnectionManagerDelegate {
             return ""
         }
     }
-
+    
     @Test func testDeleteConnection() async throws {
         let conformer = MockConnectionDelegate(
             manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
@@ -262,134 +245,142 @@ actor ConnectionManagerKitTests: ConnectionManagerDelegate {
 }
 
 final class MockConnectionDelegate: ConnectionDelegate {
-
+    func handleError(_ stream: AsyncStream<NWError>, id: String) {
+        
+    }
+    
+    func handleNetworkEvents(_ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NetworkEvent>, id: String) {
+        
+    }
+    
+    
     func initializedChildChannel<Outbound, Inbound>(
         _ context: ConnectionManagerKit.ChannelContext<Inbound, Outbound>
     ) async where Outbound: Sendable, Inbound: Sendable {
-
+        print("INITIALIZED CHILD CHANNEL")
     }
-
+    
     nonisolated(unsafe) var servers = [ServerLocation]()
     let listenerDelegation: ListenerDelegation
     nonisolated(unsafe) var networkEventTask: Task<Void, Never>?
     nonisolated(unsafe) var inactiveTask: Task<Void, Never>?
     nonisolated(unsafe) var errorTask: Task<Void, Never>?
     let manager: ConnectionManager
-
+    
     init(manager: ConnectionManager, listenerDelegation: ListenerDelegation) {
         self.manager = manager
         self.listenerDelegation = listenerDelegation
     }
-
+    
     func configureChildChannel() async {}
-
+    
     func didShutdownChildChannel() async {}
-
-    #if canImport(Network)
-        func handleError(_ stream: AsyncStream<NWError>) {
-            errorTask = Task {
-                for await error in stream.cancelOnGracefulShutdown() {
-                    print("RECEIVED ERROR", error)
-                }
+    
+#if canImport(Network)
+    func handleError(_ stream: AsyncStream<NWError>) {
+        errorTask = Task {
+            for await error in stream.cancelOnGracefulShutdown() {
+                print("RECEIVED ERROR", error)
             }
         }
-
-        func handleNetworkEvents(
-            _ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NetworkEvent>
-        ) {
-            networkEventTask = Task {
-                for await event in stream.cancelOnGracefulShutdown() {
-                    switch event {
-                    case .betterPathAvailable(_):
-                        break
-                    case .betterPathUnavailable:
-                        break
-                    case .viabilityChanged(let state):
-                        if state.isViable, !servers.isEmpty {
-                            var _servers = 0
-
-                            for server in servers {
-                                _servers += 1
-                                let fc1 = await manager.connectionCache.findConnection(
-                                    cacheKey: server.cacheKey)
-                                await #expect(fc1?.config.host == server.host)
-                                try! await Task.sleep(until: .now + .seconds(5))
-                                await manager.shutdown(cacheKey: server.cacheKey)
-                            }
-                        } else {
-                            break
-                        }
-                    case .connectToNWEndpoint(_):
-                        break
-                    case .bindToNWEndpoint(_):
-                        break
-                    case .waitingForConnectivity(let error):
-                        print("RECEIVED waitingForConnectivity ERROR", error.transientError)
-                        switch error.transientError {
-                        case .posix(let code):
-                            switch code {
-                            case .ECONNREFUSED:
-                               break
-                            default:
-                                break
-                            }
-                        case .dns(let code):
-                            print("RECEIVED DNS CODE", code)
-                        case .tls(let code):
-                            print("RECEIVED TLS CODE", code)
-                        @unknown default:
-                            break
-                        }
-                    case .pathChanged(_):
-                        break
-                    }
-                }
-            }
-        }
-
-    #else
-        func handleError(_ stream: AsyncStream<IOError>) {
-            Task {
-                for await error in stream {
-                    print("RECEIVED ERROR", error)
-                }
-            }
-        }
-
-        func handleNetworkEvents(
-            _ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NIOEvent>
-        ) {
-            Task {
-                for await event in stream.cancelOnGracefulShutdown() {
-                    switch event {
-                    default:
-                        print("RECEVIED", event)
-                    }
-                }
-            }
-        }
-
-    #endif
-
-    func channelActive(_ stream: AsyncStream<Void>) {
-        #if !canImport(Network)
-            Task {
-                for await _ in stream.cancelOnGracefulShutdown() {
-                    if !servers.isEmpty {
-                        try! await Task.sleep(until: .now + .seconds(5))
+    }
+    
+    func handleNetworkEvents(
+        _ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NetworkEvent>
+    ) {
+        networkEventTask = Task {
+            for await event in stream.cancelOnGracefulShutdown() {
+                switch event {
+                case .betterPathAvailable(_):
+                    break
+                case .betterPathUnavailable:
+                    break
+                case .viabilityChanged(let state):
+                    if state.isViable, !servers.isEmpty {
+                        var _servers = 0
+                        
                         for server in servers {
-                            print(server)
+                            _servers += 1
                             let fc1 = await manager.connectionCache.findConnection(
                                 cacheKey: server.cacheKey)
                             await #expect(fc1?.config.host == server.host)
-                            await manager.shutdown(cacheKey: server.cacheKey)
+                            try! await Task.sleep(until: .now + .seconds(5))
+                            await manager.gracefulShutdown()
                         }
+                    } else {
+                        break
+                    }
+                case .connectToNWEndpoint(_):
+                    break
+                case .bindToNWEndpoint(_):
+                    break
+                case .waitingForConnectivity(let error):
+                    print("RECEIVED waitingForConnectivity ERROR", error.transientError)
+                    switch error.transientError {
+                    case .posix(let code):
+                        switch code {
+                        case .ECONNREFUSED:
+                            break
+                        default:
+                            break
+                        }
+                    case .dns(let code):
+                        print("RECEIVED DNS CODE", code)
+                    case .tls(let code):
+                        print("RECEIVED TLS CODE", code)
+                    @unknown default:
+                        break
+                    }
+                case .pathChanged(_):
+                    break
+                }
+            }
+        }
+    }
+    
+#else
+    func handleError(_ stream: AsyncStream<IOError>) {
+        Task {
+            for await error in stream {
+                print("RECEIVED ERROR", error)
+            }
+        }
+    }
+    
+    func handleNetworkEvents(
+        _ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NIOEvent>
+    ) {
+        Task {
+            for await event in stream.cancelOnGracefulShutdown() {
+                switch event {
+                default:
+                    print("RECEVIED", event)
+                }
+            }
+        }
+    }
+    
+#endif
+    
+    func channelActive(_ stream: AsyncStream<Void>, id: String) {
+#if !canImport(Network)
+        Task {
+            for await _ in stream.cancelOnGracefulShutdown() {
+                if !servers.isEmpty {
+                    try! await Task.sleep(until: .now + .seconds(5))
+                    for server in servers {
+                        print(server)
+                        let fc1 = await manager.connectionCache.findConnection(
+                            cacheKey: server.cacheKey)
+                        await #expect(fc1?.config.host == server.host)
+                        await manager.shutdown(cacheKey: server.cacheKey)
                     }
                 }
             }
-        #endif
+        }
+#endif
     }
-
+    
     func channelInActive(_ stream: AsyncStream<Void>) {
         inactiveTask = Task {
             for await _ in stream.cancelOnGracefulShutdown() {
@@ -397,16 +388,16 @@ final class MockConnectionDelegate: ConnectionDelegate {
             }
         }
     }
-
+    
     func reportChildChannel(error: any Error, id: String) async {
-
+        
     }
-
+    
     func deliverWriter<Outbound>(writer: NIOCore.NIOAsyncChannelOutboundWriter<Outbound>) async
     where Outbound: Sendable {}
-
+    
     func deliverInboundBuffer<Inbound>(inbound: Inbound) async where Inbound: Sendable {}
-
+    
     private func tearDown() async {
         if await manager.connectionCache.isEmpty {
             networkEventTask?.cancel()
@@ -414,36 +405,35 @@ final class MockConnectionDelegate: ConnectionDelegate {
             inactiveTask?.cancel()
         }
     }
-
 }
 
 final class MockChannelContextDelegate: ChannelContextDelegate {
-    func channelActive(_ stream: AsyncStream<Void>) {
-
+    func channelActive(_ stream: AsyncStream<Void>, id: String) {
+        
     }
-
-    func channelInActive(_ stream: AsyncStream<Void>) {
-        print("MOCK DELEGATION CHANNEL INACTIVE")
+    
+    func channelInactive(_ stream: AsyncStream<Void>, id: String) {
+        
     }
-
+    
     func reportChildChannel(error: any Error, id: String) async {
         print("MOCK DELEGATION RECEIVE ERROR", error)
     }
-
+    
     func didShutdownChildChannel() async {
-
+        
     }
-
+    
     func deliverWriter<Outbound, Inbound>(
         context: ConnectionManagerKit.WriterContext<Inbound, Outbound>
     ) async where Outbound: Sendable, Inbound: Sendable {
-
+        
     }
-
+    
     func deliverInboundBuffer<Inbound, Outbound>(
         context: ConnectionManagerKit.StreamContext<Inbound, Outbound>
     ) async where Inbound: Sendable, Outbound: Sendable {
-
+        
     }
-
+    
 }

@@ -5,6 +5,7 @@
 //  Created by Cole M on 12/2/24.
 //
 import NIOCore
+import NIOConcurrencyHelpers
 #if os(Linux)
 import Glibc
 #else
@@ -19,8 +20,9 @@ import NIOTransportServices
 public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendable {
     public typealias InboundIn = ByteBuffer
     
-    public let connectionIdentfier: String
+    public let connectionIdentifier: String
     private let didSetError = ManagedAtomic(false)
+    private let lock = NIOLock()
 #if canImport(Network)
     var errorStream: AsyncStream<NWError>?
     private var errorContinuation: AsyncStream<NWError>.Continuation?
@@ -34,34 +36,40 @@ public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendab
 #endif
     var channelActiveStream: AsyncStream<Void>?
     private var channelActiveContinuation: AsyncStream<Void>.Continuation?
-    var channelInActiveStream: AsyncStream<Void>?
-    private var channelInActiveContinuation: AsyncStream<Void>.Continuation?
+    var channelInactiveStream: AsyncStream<Void>?
+    private var channelInactiveContinuation: AsyncStream<Void>.Continuation?
 
     
     init(connectionIdentifier: String) {
-        self.connectionIdentfier = connectionIdentifier
+        self.connectionIdentifier = connectionIdentifier
 #if canImport(Network)
-        errorStream = AsyncStream<NWError>(bufferingPolicy: .bufferingNewest(1)) { continuation in
+        errorStream = AsyncStream<NWError>(bufferingPolicy: .bufferingNewest(1)) { [weak self] continuation in
+            guard let self else { return }
             self.errorContinuation = continuation
         }
         
-        eventStream = AsyncStream<NetworkEvent>(bufferingPolicy: .bufferingNewest(1)) { continuation in
+        eventStream = AsyncStream<NetworkEvent>(bufferingPolicy: .bufferingNewest(1)) { [weak self] continuation in
+            guard let self else { return }
             self.eventContinuation = continuation
         }
 #else
-        errorStream = AsyncStream<IOError>(bufferingPolicy: .bufferingNewest(1)) { continuation in
+        errorStream = AsyncStream<IOError>(bufferingPolicy: .bufferingNewest(1)) { [weak self] continuation in
+            guard let self else { return }
             self.errorContinuation = continuation
         }
         
-        eventStream = AsyncStream<NIOEvent>(bufferingPolicy: .bufferingNewest(1)) { continuation in
+        eventStream = AsyncStream<NIOEvent>(bufferingPolicy: .bufferingNewest(1)) { [weak self] continuation in
+            guard let self else { return }
             self.eventContinuation = continuation
         }
 #endif
-        channelActiveStream = AsyncStream<Void>(bufferingPolicy: .bufferingNewest(1)) { continuation in
+        channelActiveStream = AsyncStream<Void>(bufferingPolicy: .bufferingNewest(1)) { [weak self] continuation in
+            guard let self else { return }
             self.channelActiveContinuation = continuation
         }
-        channelInActiveStream = AsyncStream<Void>(bufferingPolicy: .bufferingNewest(1)) { continuation in
-            self.channelInActiveContinuation = continuation
+        channelInactiveStream = AsyncStream<Void>(bufferingPolicy: .bufferingNewest(1)) { [weak self] continuation in
+            guard let self else { return }
+            self.channelInactiveContinuation = continuation
         }
     }
     
@@ -72,7 +80,10 @@ public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendab
         if nwError == .posix(.ENETDOWN) || nwError == .posix(.ENOTCONN), !didSetError.load(ordering: .acquiring) {
             didSetError.store(true, ordering: .relaxed)
             if let nwError = nwError {
-                errorContinuation?.yield(nwError)
+                lock.withLock { [weak self] in
+                    guard let self else { return }
+                    self.errorContinuation?.yield(nwError)
+                }
             } 
         }
 #else 
@@ -80,8 +91,11 @@ public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendab
     if error?.errnoCode == ENETDOWN || error?.errnoCode == ENOTCONN, !didSetError.load(ordering: .acquiring) {
         didSetError.store(true, ordering: .relaxed)
         if let error: IOError = error {
-                errorContinuation?.yield(error)
-            } 
+            lock.withLock { [weak self] in
+                guard let self else { return }
+                self.errorContinuation?.yield(error)
+            }
+            }
     }
 #endif
     }
@@ -127,21 +141,34 @@ public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendab
         default:
             eventType = nil
         }
+        
         if let eventType = eventType {
-            eventContinuation?.yield(eventType)
+            lock.withLock { [weak self] in
+                guard let self else { return }
+                self.eventContinuation?.yield(eventType)
+            }
         }
 #else
-        eventContinuation?.yield(NIOEvent.event(event))
+        lock.withLock { [weak self] in
+            guard let self else { return }
+            self.eventContinuation?.yield(NIOEvent.event(event))
+        }
 #endif
     }
 
     public func channelActive(context: ChannelHandlerContext) {
         context.fireChannelActive()
-        channelActiveContinuation?.yield()
+        lock.withLock { [weak self] in
+            guard let self else { return }
+            self.channelActiveContinuation?.yield()
+        }
     }
 
     public func channelInactive(context: ChannelHandlerContext) {
         context.fireChannelInactive()
-        channelInActiveContinuation?.yield()
+        lock.withLock { [weak self] in
+            guard let self else { return }
+            self.channelInactiveContinuation?.yield()
+        }
     }
 }

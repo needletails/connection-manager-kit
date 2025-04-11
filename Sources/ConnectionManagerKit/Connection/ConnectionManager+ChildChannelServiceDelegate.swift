@@ -10,17 +10,6 @@ import NIOCore
 extension ConnectionManager: ChildChannelServiceDelelgate {
     func initializedChildChannel<Outbound, Inbound>(_ context: ChannelContext<Inbound, Outbound>) async where Outbound : Sendable, Inbound : Sendable {
         let foundConnection = await connectionCache.findConnection(cacheKey: context.id)
-        await foundConnection?.config.delegate.initializedChildChannel(context)
-    }
-    
-    nonisolated func shutdown(location: ServerLocation) {
-        if shutdownTask != nil {
-            shutdownTask?.cancel()
-            self.shutdownTask = nil
-        }
-        shutdownTask = Task { [weak self] in
-            guard let self else { return }
-            await self.shutdown(cacheKey: location.cacheKey)
-        }
+        await foundConnection?.config.delegate?.initializedChildChannel(context)
     }
 }

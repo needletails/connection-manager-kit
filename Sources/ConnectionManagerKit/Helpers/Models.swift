@@ -32,17 +32,17 @@ public struct ServerLocation: Sendable {
     public var enableTLS: Bool
     public var cacheKey: String
     /// Each connection delegate needs to map to it's own conformer
-    public let delegate: ConnectionDelegate
+    public var delegate: ConnectionDelegate?
     /// Each context delegate needs to map to it's own conformer
-    public let contextDelegate: ChannelContextDelegate
+    public var contextDelegate: ChannelContextDelegate?
     
     public init(
         host: String,
         port: Int,
         enableTLS: Bool,
         cacheKey: String,
-        delegate: ConnectionDelegate,
-        contextDelegate: ChannelContextDelegate
+        delegate: ConnectionDelegate? = nil,
+        contextDelegate: ChannelContextDelegate? = nil
     ) {
         self.host = host
         self.port = port

@@ -29,7 +29,7 @@ public protocol ConnectionDelegate: AnyObject, Sendable {
 
 public protocol ChannelContextDelegate: AnyObject, Sendable {
     func channelActive(_ stream: AsyncStream<Void>, id: String)
-    func channelInActive(_ stream: AsyncStream<Void>, id: String)
+    func channelInactive(_ stream: AsyncStream<Void>, id: String)
     func reportChildChannel(error: any Error, id: String) async
     func didShutdownChildChannel() async
     func deliverWriter<Outbound, Inbound>(context: WriterContext<Inbound, Outbound>) async
