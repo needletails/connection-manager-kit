@@ -310,12 +310,12 @@ public actor ConnectionManager {
     /// - Parameters:
     ///   - monitor: The `NetworkEventMonitor` instance to monitor events from.
     ///   - server: The `ServerLocation` associated with the connection.
-    private func delegateMonitorEvents(monitor: NetworkEventMonitor, server: ServerLocation) {
+    private func delegateMonitorEvents(monitor: NetworkEventMonitor, server: ServerLocation) async {
         if let errorStream = monitor.errorStream {
             server.delegate?.handleError(errorStream, id: monitor.connectionIdentifier)
         }
         if let eventStream = monitor.eventStream {
-            server.delegate?.handleNetworkEvents(eventStream, id: monitor.connectionIdentifier)
+            await server.delegate?.handleNetworkEvents(eventStream, id: monitor.connectionIdentifier)
         }
         if let channelActiveStream = monitor.channelActiveStream {
             server.contextDelegate?.channelActive(channelActiveStream, id: monitor.connectionIdentifier)

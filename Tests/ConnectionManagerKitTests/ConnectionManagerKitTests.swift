@@ -349,7 +349,7 @@ final class MockConnectionDelegate: ConnectionDelegate {
     
     func handleNetworkEvents(
         _ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NIOEvent>
-    ) {
+    ) async {
         Task {
             for await event in stream.cancelOnGracefulShutdown() {
                 switch event {

@@ -19,10 +19,10 @@ protocol ChildChannelServiceDelelgate: Sendable {
 public protocol ConnectionDelegate: AnyObject, Sendable {
 #if canImport(Network)
     func handleError(_ stream: AsyncStream<NWError>, id: String)
-    func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>, id: String)
+    func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>, id: String) async
 #else
     func handleError(_ stream: AsyncStream<IOError>, id: String)
-    func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NIOEvent>, id: String)
+    func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NIOEvent>, id: String) async
 #endif
     func initializedChildChannel<Outbound, Inbound>(_ context: ChannelContext<Inbound, Outbound>) async where Outbound : Sendable, Inbound : Sendable
 }

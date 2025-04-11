@@ -141,7 +141,7 @@ public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendab
         default:
             eventType = nil
         }
-        
+       
         if let eventType = eventType {
             lock.withLock { [weak self] in
                 guard let self else { return }
