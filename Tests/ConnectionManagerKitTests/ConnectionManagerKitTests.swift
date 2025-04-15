@@ -167,31 +167,37 @@ actor ConnectionManagerKitTests: ConnectionManagerDelegate {
         let conformer = MockConnectionDelegate(
             manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
         let c1 = ChildChannelService<ByteBuffer, ByteBuffer>(
+            logger: .init(),
             config: .init(
                 host: "l1", port: 0, enableTLS: false, cacheKey: "s1", delegate: conformer,
                 contextDelegate: MockChannelContextDelegate()), childChannel: nil, delegate: manager
         )
         let c2 = ChildChannelService<ByteBuffer, ByteBuffer>(
+            logger: .init(),
             config: .init(
                 host: "l2", port: 1, enableTLS: false, cacheKey: "s2", delegate: conformer,
                 contextDelegate: MockChannelContextDelegate()), childChannel: nil, delegate: manager
         )
         let c3 = ChildChannelService<ByteBuffer, ByteBuffer>(
+            logger: .init(),
             config: .init(
                 host: "l3", port: 2, enableTLS: false, cacheKey: "s3", delegate: conformer,
                 contextDelegate: MockChannelContextDelegate()), childChannel: nil, delegate: manager
         )
         let c4 = ChildChannelService<ByteBuffer, ByteBuffer>(
+            logger: .init(),
             config: .init(
                 host: "l4", port: 3, enableTLS: false, cacheKey: "s4", delegate: conformer,
                 contextDelegate: MockChannelContextDelegate()), childChannel: nil, delegate: manager
         )
         let c5 = ChildChannelService<ByteBuffer, ByteBuffer>(
+            logger: .init(),
             config: .init(
                 host: "l5", port: 4, enableTLS: false, cacheKey: "s5", delegate: conformer,
                 contextDelegate: MockChannelContextDelegate()), childChannel: nil, delegate: manager
         )
         let c6 = ChildChannelService<ByteBuffer, ByteBuffer>(
+            logger: .init(),
             config: .init(
                 host: "l6", port: 5, enableTLS: false, cacheKey: "s6", delegate: conformer,
                 contextDelegate: MockChannelContextDelegate()), childChannel: nil, delegate: manager
@@ -209,6 +215,7 @@ actor ConnectionManagerKitTests: ConnectionManagerDelegate {
         let conformer = MockConnectionDelegate(
             manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
         let c1 = ChildChannelService<ByteBuffer, ByteBuffer>(
+            logger: .init(),
             config: .init(
                 host: "l1", port: 0, enableTLS: false, cacheKey: "s1", delegate: conformer,
                 contextDelegate: MockChannelContextDelegate()), childChannel: nil, delegate: manager
@@ -234,6 +241,7 @@ actor ConnectionManagerKitTests: ConnectionManagerDelegate {
         let conformer = MockConnectionDelegate(
             manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
         let c1 = ChildChannelService<ByteBuffer, ByteBuffer>(
+            logger: .init(),
             config: .init(
                 host: "l1", port: 0, enableTLS: false, cacheKey: "s1", delegate: conformer,
                 contextDelegate: MockChannelContextDelegate()), childChannel: nil, delegate: manager

@@ -4,9 +4,11 @@
 //
 //  Created by Cole M on 11/27/24.
 //
+import NeedleTailLogger
 
 actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
     
+    private let logger: NeedleTailLogger
     private var connections: [String: ChildChannelService<Inbound, Outbound>] = [:]
     
     var isEmpty: Bool {
@@ -17,19 +19,23 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
         return connections.count
     }
     
+    init(logger: NeedleTailLogger) {
+        self.logger = logger
+    }
+    
     // Cache a new connection
     func cacheConnection(_ connection: ChildChannelService<Inbound, Outbound>, for cacheKey: String) {
         connections[cacheKey] = connection
-        print("Cached connection for cacheKey: \(cacheKey)")
+        logger.log(level: .info, message: "Cached connection for cacheKey: \(cacheKey)")
     }
     
     // Update an existing connection
     func updateConnection(_ connection: ChildChannelService<Inbound, Outbound>, for cacheKey: String) {
         if connections[cacheKey] != nil {
             connections[cacheKey] = connection
-            print("Updated connection for cacheKey: \(cacheKey)")
+            logger.log(level: .info, message: "Updated connection for cacheKey: \(cacheKey)")
         } else {
-            print("No existing connection found for cacheKey: \(cacheKey). Caching new connection instead.")
+            logger.log(level: .info, message: "No existing connection found for cacheKey: \(cacheKey). Caching new connection instead.")
             cacheConnection(connection, for: cacheKey)
         }
     }
@@ -37,10 +43,10 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
     // Find a connection by cacheKey
     func findConnection(cacheKey: String) -> ChildChannelService<Inbound, Outbound>? {
         if let connection = connections[cacheKey] {
-            print("Found connection for cacheKey: \(cacheKey)")
+            logger.log(level: .info, message: "Found connection for cacheKey: \(cacheKey)")
             return connection
         } else {
-            print("No connection found for cacheKey: \(cacheKey)")
+            logger.log(level: .info, message: "No connection found for cacheKey: \(cacheKey)")
             return nil
         }
     }
@@ -50,9 +56,9 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
         if let foundConnection = connections[cacheKey] {
             try await foundConnection.shutdown()
             connections[cacheKey] = nil
-            print("Removed connection for cacheKey: \(cacheKey)")
+            logger.log(level: .info, message: "Removed connection for cacheKey: \(cacheKey)")
         } else {
-            print("No connection found for cacheKey: \(cacheKey)")
+            logger.log(level: .info, message: "No connection found for cacheKey: \(cacheKey)")
         }
     }
     

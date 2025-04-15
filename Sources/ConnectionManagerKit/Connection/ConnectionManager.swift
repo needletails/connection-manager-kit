@@ -6,7 +6,7 @@ import NIOExtras
 import NIOPosix
 import NIOSSL
 import ServiceLifecycle
-
+import NeedleTailLogger
 #if canImport(Network)
 import Network
 import NIOTransportServices
@@ -58,10 +58,10 @@ public protocol ConnectionManagerDelegate: AnyObject, Sendable {
 /// A manager responsible for handling network connections, including establishing, caching, and monitoring connections.
 public actor ConnectionManager {
     
-    internal let connectionCache = ConnectionCache<ByteBuffer, ByteBuffer>()
+    internal let connectionCache: ConnectionCache<ByteBuffer, ByteBuffer>
     private let group: EventLoopGroup
     private var serviceGroup: ServiceGroup?
-    
+    private let logger: NeedleTailLogger
     /// A weak reference to the delegate that conforms to `ConnectionManagerDelegate`.
     nonisolated(unsafe) public weak var delegate: ConnectionManagerDelegate?
     
@@ -75,7 +75,9 @@ public actor ConnectionManager {
     }
     
     /// Initializes a new `ConnectionManager` instance.
-    public init() {
+    public init(logger: NeedleTailLogger = NeedleTailLogger()) {
+        self.logger = logger
+        self.connectionCache = ConnectionCache<ByteBuffer, ByteBuffer>(logger: logger)
         #if canImport(Network)
         self.group = NIOTSEventLoopGroup.singleton
         #else
@@ -161,6 +163,7 @@ public actor ConnectionManager {
                 tlsPreKeyed: tlsPreKeyed)
             await connectionCache.cacheConnection(
                 .init(
+                    logger: logger,
                     config: server,
                     childChannel: childChannel,
                     delegate: self), for: server.cacheKey)
@@ -172,7 +175,7 @@ public actor ConnectionManager {
             }
         } catch {
             // If the connection fails
-            print("Failed to connect to the server. Attempt: \(currentAttempt + 1) of \(maxAttempts)")
+            logger.log(level: .error, message: "Failed to connect to the server. Attempt: \(currentAttempt + 1) of \(maxAttempts)")
             
             if currentAttempt < maxAttempts - 1 {
                 // Recursively attempt to connect again after a delay
@@ -332,9 +335,9 @@ public actor ConnectionManager {
         do {
             await serviceGroup?.triggerGracefulShutdown()
             try await connectionCache.removeAllConnection()
-            print("Gracefully shut down service and removed connections from cache.")
+            logger.log(level: .info, message: "Gracefully shut down service and removed connections from cache.")
         } catch {
-            print("Error shutting down connection group: \(error)")
+            logger.log(level: .error, message: "Error shutting down connection group: \(error)")
             await serviceGroup?.triggerGracefulShutdown()
         }
         serviceGroup = nil

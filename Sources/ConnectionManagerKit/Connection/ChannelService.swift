@@ -5,6 +5,7 @@
 //  Created by Cole M on 11/27/24.
 //
 import Foundation
+import NeedleTailLogger
 import NIOCore
 #if canImport(Network)
 import Network
@@ -12,8 +13,9 @@ import Network
 import ServiceLifecycle
 
 public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service {
-
+    
     public var config: ServerLocation
+    let logger: NeedleTailLogger
     let childChannel: NIOAsyncChannel<Inbound, Outbound>?
     let delegate: ChildChannelServiceDelelgate
     private var connectionDelegate: ConnectionDelegate?
@@ -28,10 +30,12 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
     }
     
     init(
+        logger: NeedleTailLogger,
         config: ServerLocation,
         childChannel: NIOAsyncChannel<Inbound, Outbound>?,
         delegate: ChildChannelServiceDelelgate
     ) {
+        self.logger = logger
         self.config = config
         self.childChannel = childChannel
         self.delegate = delegate
@@ -39,8 +43,7 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
         self.contextDelegate = config.contextDelegate
     }
     
-    public
-    func run() async throws {
+    public func run() async throws {
         try await exectuteTask()
     }
     
@@ -101,9 +104,10 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
             continuation.yield(outbound)
             self.continuation = continuation
             
-            continuation.onTermination = { status in
+            continuation.onTermination = { [weak self] status in
 #if DEBUG
-                print("Writer Stream Terminated with status: \(status)")
+                guard let self else { return }
+                self.logger.log(level: .trace, message: "Writer Stream Terminated with status: \(status)")
 #endif
             }
         }
@@ -112,9 +116,10 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
             continuation.yield(inbound)
             self.inboundContinuation = continuation
             
-            continuation.onTermination = { status in
+            continuation.onTermination = { [weak self] status in
 #if DEBUG
-                print("Inbound Stream Terminated with status: \(status)")
+                guard let self else { return }
+                self.logger.log(level: .trace, message: "Inbound Stream Terminated with status: \(status)")
 #endif
             }
         }

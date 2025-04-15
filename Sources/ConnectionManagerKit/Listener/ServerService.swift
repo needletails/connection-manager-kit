@@ -158,7 +158,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
                 }
             } catch {
                 stopPromise.fail(error)
-                await logger.log(level: .trace, message: "There was a problem stopping TLS \(error)")
+                logger.log(level: .trace, message: "There was a problem stopping TLS \(error)")
             }
         }
     }
@@ -204,17 +204,19 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
                     
                     let (_outbound, outboundContinuation) = AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.makeStream()
                     await setOutboundContinuation(outboundContinuation, id: channelId.uuidString)
-                    outboundContinuation.onTermination = { status in
+                    outboundContinuation.onTermination = { [weak self] status in
 #if DEBUG
-                        print("Server Writer Stream Terminated with status: \(status)")
+                        guard let self else { return }
+                        self.logger.log(level: .trace, message: "Server Writer Stream Terminated with status: \(status)")
 #endif
                     }
                     
                     let (_inbound, inboundContinuation) = AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.makeStream()
                     await setInboundContinuation(inboundContinuation, id: channelId.uuidString)
-                    inboundContinuation.onTermination = { status in
+                    inboundContinuation.onTermination = { [weak self] status in
 #if DEBUG
-                        print("Server Inbound Stream Terminated with status: \(status)")
+                        guard let self else { return }
+                        self.logger.log(level: .trace, message: "Server Inbound Stream Terminated with status: \(status)")
 #endif
                         outboundContinuation.finish()
                     }
