@@ -7,7 +7,7 @@
 
 import NIOCore
 
-extension ConnectionManager: ChildChannelServiceDelelgate {
+extension ConnectionManager: ChildChannelServiceDelegate {
     func initializedChildChannel<Outbound, Inbound>(_ context: ChannelContext<Inbound, Outbound>) async where Outbound : Sendable, Inbound : Sendable {
         let foundConnection = await connectionCache.findConnection(cacheKey: context.id)
         await foundConnection?.config.delegate?.initializedChildChannel(context)

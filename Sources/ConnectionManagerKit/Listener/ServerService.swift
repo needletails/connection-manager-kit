@@ -16,7 +16,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
     
     private let address: SocketAddress
     private let configuration: Configuration
-    private let delegate: ChildChannelServiceDelelgate
+    private let delegate: ChildChannelServiceDelegate
     private let logger: NeedleTailLogger
     private var contextDelegates: [String: ChannelContextDelegate] = [:]
     private var channelContexts = [ChannelContext<Inbound, Outbound>]()
@@ -34,7 +34,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
         address: SocketAddress, 
         configuration: Configuration,
         logger: NeedleTailLogger,
-        delegate: ChildChannelServiceDelelgate,
+        delegate: ChildChannelServiceDelegate,
         listenerDelegate: ListenerDelegate?,
         serviceListenerDelegate: ServiceListenerDelegate?
     ) {

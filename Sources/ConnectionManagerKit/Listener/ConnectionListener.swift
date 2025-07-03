@@ -96,7 +96,7 @@ public actor ConnectionListener: ServiceListenerDelegate {
 }
 
 
-extension ConnectionListener: ChildChannelServiceDelelgate {
+extension ConnectionListener: ChildChannelServiceDelegate {
     func initializedChildChannel<Outbound, Inbound>(_ context: ChannelContext<Inbound, Outbound>) async where Outbound : Sendable, Inbound : Sendable {
         await delegate?.initializedChildChannel(context)
     }

@@ -12,62 +12,160 @@ import Network
 import NIOTransportServices
 #endif
 
+/// Configuration for pre-configured TLS settings that can be applied to connections.
+///
+/// This struct provides a unified interface for TLS configuration across different platforms.
+/// On Apple platforms, it wraps `NWProtocolTLS.Options`, while on other platforms it wraps `TLSConfiguration`.
+///
+/// ## Usage Example
+/// ```swift
+/// #if canImport(Network)
+/// let tlsOptions = NWProtocolTLS.Options()
+/// sec_protocol_options_set_min_tls_protocol_version(tlsOptions.securityProtocolOptions, .TLSv13)
+/// let tlsConfig = TLSPreKeyedConfiguration(tlsOption: tlsOptions)
+/// #else
+/// var tlsConfig = TLSConfiguration.makeClientConfiguration()
+/// tlsConfig?.minimumTLSVersion = .tlsv13
+/// let preKeyedConfig = TLSPreKeyedConfiguration(tlsConfiguration: tlsConfig!)
+/// #endif
+/// ```
 public struct TLSPreKeyedConfiguration: Sendable {
 #if canImport(Network)
+    /// The TLS options for Apple platforms using Network framework.
     public let tlsOption: NWProtocolTLS.Options
+    
+    /// Creates a new TLS pre-keyed configuration for Apple platforms.
+    /// - Parameter tlsOption: The Network framework TLS options to use.
     public init(tlsOption: NWProtocolTLS.Options) {
         self.tlsOption = tlsOption
     }
 #else
+    /// The TLS configuration for non-Apple platforms using NIO SSL.
     public let tlsConfiguration: TLSConfiguration
+    
+    /// Creates a new TLS pre-keyed configuration for non-Apple platforms.
+    /// - Parameter tlsConfiguration: The NIO SSL TLS configuration to use.
     public init(tlsConfiguration: TLSConfiguration) {
         self.tlsConfiguration = tlsConfiguration
     }
 #endif
 }
 
-
 /// A protocol that defines the delegate methods for managing connections in a network context.
 ///
 /// Conforming types can provide custom channel handlers and receive the `NIOAsyncChannel` for further configuration.
+/// This delegate is responsible for handling the lifecycle of connections and providing custom channel handlers.
+///
+/// ## Usage Example
+/// ```swift
+/// class MyConnectionManagerDelegate: ConnectionManagerDelegate {
+///     func retrieveChannelHandlers() -> [ChannelHandler] {
+///         return [MyCustomHandler()]
+///     }
+///     
+///     func deliverChannel(_ channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>, 
+///                        manager: ConnectionManager, 
+///                        cacheKey: String) async {
+///         await manager.setDelegates(
+///             connectionDelegate: self,
+///             contextDelegate: contextDelegate,
+///             cacheKey: cacheKey
+///         )
+///     }
+/// }
+/// ```
 public protocol ConnectionManagerDelegate: AnyObject, Sendable {
     
     /// Retrieves an array of custom channel handlers required by the consumer.
     ///
     /// This method allows the delegate to specify any additional handlers that should be added to the
-    /// *NIO* pipeline. The returned handlers will be integrated into the connection's processing flow.
+    /// NIO pipeline. The returned handlers will be integrated into the connection's processing flow.
     ///
-    /// - Returns: An array of `ChannelHandler` instances.
+    /// - Returns: An array of `ChannelHandler` instances to be added to the connection pipeline.
     func retrieveChannelHandlers() -> [ChannelHandler]
     
     /// Delivers the `NIOAsyncChannel` to the delegate for further configuration.
     ///
-    /// This method provides access to the underlying `NIOChannel`, allowing the delegate to set a custom
-    /// executor on the connection actor. It is essential to call this method in order to properly configure
+    /// This method provides access to the underlying `NIOChannel`, allowing the delegate to set up
+    /// connection-specific delegates. It is essential to call this method in order to properly configure
     /// the connection manager by invoking the `setDelegates(connectionDelegate:contextDelegate:cacheKey:)`
     /// method with the conforming instances of `ConnectionDelegate` and `ChannelContextDelegate`.
     ///
     /// - Parameters:
     ///   - channel: The `NIOAsyncChannel<ByteBuffer, ByteBuffer>` instance that represents the connection.
     ///   - manager: The `ConnectionManager` instance responsible for managing the connection.
+    ///   - cacheKey: A unique identifier for the connection in the cache.
     ///
     /// - Note: This method is asynchronous and should be awaited.
     func deliverChannel(_ channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>, manager: ConnectionManager, cacheKey: String) async
 }
 
 /// A manager responsible for handling network connections, including establishing, caching, and monitoring connections.
+///
+/// `ConnectionManager` provides a high-level interface for managing multiple network connections with automatic
+/// reconnection, connection caching, and network event monitoring. It supports both TLS and non-TLS connections
+/// and works across different platforms (Apple platforms using Network framework, others using NIO).
+///
+/// ## Key Features
+/// - **Connection Caching**: Automatically caches connections for reuse
+/// - **Automatic Reconnection**: Handles connection failures with configurable retry logic
+/// - **TLS Support**: Built-in support for TLS connections with customizable configurations
+/// - **Network Monitoring**: Monitors network events and connection state changes
+/// - **Cross-Platform**: Works on iOS, macOS, tvOS, watchOS, and Linux
+///
+/// ## Usage Example
+/// ```swift
+/// let manager = ConnectionManager(logger: NeedleTailLogger())
+/// manager.delegate = MyConnectionManagerDelegate()
+/// 
+/// let servers = [
+///     ServerLocation(
+///         host: "api.example.com",
+///         port: 443,
+///         enableTLS: true,
+///         cacheKey: "api-server",
+///         delegate: connectionDelegate,
+///         contextDelegate: contextDelegate
+///     )
+/// ]
+/// 
+/// try await manager.connect(
+///     to: servers,
+///     maxReconnectionAttempts: 5,
+///     timeout: .seconds(10)
+/// )
+/// 
+/// // Later, when shutting down
+/// await manager.gracefulShutdown()
+/// ```
+///
+/// ## Thread Safety
+/// This class is implemented as an actor, ensuring thread-safe access to its internal state.
+/// All public methods are safe to call from any thread.
 public actor ConnectionManager {
     
+    /// The internal connection cache that stores active connections.
     internal let connectionCache: ConnectionCache<ByteBuffer, ByteBuffer>
+    
+    /// The event loop group used for network operations.
     private let group: EventLoopGroup
+    
+    /// The service group for managing connection lifecycle.
     private var serviceGroup: ServiceGroup?
+    
+    /// The logger instance for this connection manager.
     private let logger: NeedleTailLogger
+    
     /// A weak reference to the delegate that conforms to `ConnectionManagerDelegate`.
     nonisolated(unsafe) public weak var delegate: ConnectionManagerDelegate?
     
+    /// Internal flag for controlling reconnection behavior.
     private var _shouldReconnect = true
     
     /// A boolean indicating whether the manager should attempt to reconnect.
+    ///
+    /// This property is set to `false` when the maximum number of reconnection attempts is reached
+    /// or when `gracefulShutdown()` is called.
     public var shouldReconnect: Bool {
         get async {
             _shouldReconnect
@@ -75,6 +173,14 @@ public actor ConnectionManager {
     }
     
     /// Initializes a new `ConnectionManager` instance.
+    ///
+    /// - Parameter logger: The logger instance to use for logging connection events. 
+    ///   Defaults to a new `NeedleTailLogger` instance.
+    ///
+    /// ## Example
+    /// ```swift
+    /// let manager = ConnectionManager(logger: NeedleTailLogger())
+    /// ```
     public init(logger: NeedleTailLogger = NeedleTailLogger()) {
         self.logger = logger
         self.connectionCache = ConnectionCache<ByteBuffer, ByteBuffer>(logger: logger)
@@ -87,10 +193,22 @@ public actor ConnectionManager {
     
     /// Sets the delegates for connection and context handling.
     ///
+    /// This method allows you to update the delegates for an existing cached connection.
+    /// If no connection exists for the given cache key, this method does nothing.
+    ///
     /// - Parameters:
     ///   - connectionDelegate: The delegate responsible for handling connection events.
     ///   - contextDelegate: The delegate responsible for handling channel context events.
-    ///   - cacheKey: A unique key for caching the connection.
+    ///   - cacheKey: A unique key for identifying the connection in the cache.
+    ///
+    /// ## Example
+    /// ```swift
+    /// await manager.setDelegates(
+    ///     connectionDelegate: myConnectionDelegate,
+    ///     contextDelegate: myContextDelegate,
+    ///     cacheKey: "my-server"
+    /// )
+    /// ```
     public func setDelegates(
         connectionDelegate: ConnectionDelegate,
         contextDelegate: ChannelContextDelegate,
@@ -111,12 +229,31 @@ public actor ConnectionManager {
     
     /// Connects to a list of server locations with specified parameters.
     ///
+    /// This method attempts to establish connections to all provided servers. It will retry failed
+    /// connections according to the `maxReconnectionAttempts` parameter and monitor network events
+    /// for all established connections.
+    ///
     /// - Parameters:
     ///   - servers: An array of `ServerLocation` instances to connect to.
-    ///   - maxReconnectionAttempts: The maximum number of reconnection attempts (default is 6).
-    ///   - timeout: The timeout duration for the connection (default is 10 seconds).
-    ///   - tlsPreKeyed: Optional pre-configured TLS settings.
-    /// - Throws: An error if the connection fails.
+    ///   - maxReconnectionAttempts: The maximum number of reconnection attempts for each server. Default is 6.
+    ///   - timeout: The timeout duration for each connection attempt. Default is 10 seconds.
+    ///   - tlsPreKeyed: Optional pre-configured TLS settings to use for all connections.
+    ///
+    /// - Throws: An error if all connection attempts fail after the maximum number of retries.
+    ///
+    /// ## Example
+    /// ```swift
+    /// let servers = [
+    ///     ServerLocation(host: "server1.example.com", port: 443, enableTLS: true, cacheKey: "server1"),
+    ///     ServerLocation(host: "server2.example.com", port: 8080, enableTLS: false, cacheKey: "server2")
+    /// ]
+    /// 
+    /// try await manager.connect(
+    ///     to: servers,
+    ///     maxReconnectionAttempts: 5,
+    ///     timeout: .seconds(15)
+    /// )
+    /// ```
     public func connect(
         to servers: [ServerLocation],
         maxReconnectionAttempts: Int = 6,
@@ -140,13 +277,17 @@ public actor ConnectionManager {
     
     /// Attempts to connect to a specified server with retry logic.
     ///
+    /// This private method implements the retry logic for connection attempts. It will retry failed
+    /// connections with a 5-second delay between attempts until the maximum number of attempts is reached.
+    ///
     /// - Parameters:
     ///   - server: The `ServerLocation` to connect to.
-    ///   - currentAttempt: The current attempt number.
+    ///   - currentAttempt: The current attempt number (0-based).
     ///   - maxAttempts: The maximum number of attempts allowed.
     ///   - timeout: The timeout duration for the connection.
     ///   - tlsPreKeyed: Optional pre-configured TLS settings.
-    /// - Throws: An error if the connection fails.
+    ///
+    /// - Throws: An error if the connection fails after all retry attempts.
     private func attemptConnection(
         to server: ServerLocation,
         currentAttempt: Int,
@@ -196,16 +337,21 @@ public actor ConnectionManager {
     
     /// Errors that can occur within the `ConnectionManager`.
     enum Errors: Error {
+        /// Indicates that TLS configuration is required but not provided.
         case tlsNotConfigured
     }
     
     /// Creates a connection to the specified server.
+    ///
+    /// This private method handles the platform-specific connection creation logic,
+    /// including TLS configuration and channel setup.
     ///
     /// - Parameters:
     ///   - server: The `ServerLocation` to connect to.
     ///   - group: The `EventLoopGroup` to use for the connection.
     ///   - timeout: The timeout duration for the connection.
     ///   - tlsPreKeyed: Optional pre-configured TLS settings.
+    ///
     /// - Returns: An `NIOAsyncChannel<ByteBuffer, ByteBuffer>` representing the established connection.
     /// - Throws: An error if the connection cannot be established.
     private func createConnection(
@@ -331,6 +477,13 @@ public actor ConnectionManager {
     /// Gracefully shuts down the connection manager and cleans up resources.
     ///
     /// This method triggers a graceful shutdown of the service group and removes all connections from the cache.
+    /// After calling this method, the `shouldReconnect` property will return `false`.
+    ///
+    /// ## Example
+    /// ```swift
+    /// // When your application is shutting down
+    /// await manager.gracefulShutdown()
+    /// ```
     public func gracefulShutdown() async {
         do {
             await serviceGroup?.triggerGracefulShutdown()
