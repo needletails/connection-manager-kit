@@ -338,7 +338,7 @@ ConnectionManagerKit is designed for production use with:
 
 ## 🔗 Related Projects
 
-- [DoubleRatchetKit(https://github.com/needletails/double-ratchet-kit) - Double Ratchet Algorithm with Post-Quantum X3DH (PQXDH) integration
+- [DoubleRatchetKit](https://github.com/needletails/double-ratchet-kit) - Double Ratchet Algorithm with Post-Quantum X3DH (PQXDH) integration
 - [Post Quantum Solace](https://github.com/needletails/post-quantum-solace) - Post-Quantum cryptographic messaging SDK
 - [NeedleTailIRC](https://github.com/needletails/needletail-irc) - IRC transport layer
 
