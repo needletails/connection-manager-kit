@@ -326,7 +326,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - **Documentation**: [Documentation.docc](Sources/ConnectionManagerKit/Documentation.docc)
 - **Issues**: [GitHub Issues](https://github.com/needletails/connection-manager-kit/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/needletails/connection-manager-kit/discussions)
 
 ## 🏢 Enterprise
 
@@ -339,8 +338,8 @@ ConnectionManagerKit is designed for production use with:
 
 ## 🔗 Related Projects
 
-- [Post Quantum Solace](https://github.com/needletails/post-quantum-solace) - Post-quantum cryptographic messaging SDK
-- [Post Quantum Solace](https://github.com/needletails/double-ratchet-kit) - Double Ratchet Algorithm with Post-Quantum X3DH (PQXDH) integration
+- [DoubleRatchetKit(https://github.com/needletails/double-ratchet-kit) - Double Ratchet Algorithm with Post-Quantum X3DH (PQXDH) integration
+- [Post Quantum Solace](https://github.com/needletails/post-quantum-solace) - Post-Quantum cryptographic messaging SDK
 - [NeedleTailIRC](https://github.com/needletails/needletail-irc) - IRC transport layer
 
 ## 🤝 Contributing
