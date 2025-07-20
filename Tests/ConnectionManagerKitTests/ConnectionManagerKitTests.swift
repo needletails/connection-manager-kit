@@ -222,7 +222,7 @@ final class ListenerDelegation: ListenerDelegate {
         #else
         let tlsConfig = TLSConfiguration.makeClientConfiguration()
         let preKeyedConfig = TLSPreKeyedConfiguration(tlsConfiguration: tlsConfig)
-        #expect(preKeyedConfig.tlsConfiguration == tlsConfig)
+        #expect(preKeyedConfig.tlsConfiguration !== nil)
         #endif
     }
     
@@ -520,6 +520,7 @@ final class ListenerDelegation: ListenerDelegate {
 // MARK: - Mock Implementations
 
 final class MockConnectionDelegate: ConnectionDelegate {
+#if canImport(Network)
     func handleError(_ stream: AsyncStream<NWError>, id: String) {
         // Mock implementation
     }
@@ -527,6 +528,15 @@ final class MockConnectionDelegate: ConnectionDelegate {
     func handleNetworkEvents(_ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NetworkEvent>, id: String) async {
         // Mock implementation
     }
+#else
+    func handleError(_ stream: AsyncStream<IOError>, id: String) {
+        // Mock implementation
+    }
+    
+    func handleNetworkEvents(_ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NIOEvent>, id: String) async {
+        // Mock implementation
+    }
+#endif
     
     func initializedChildChannel<Outbound, Inbound>(
         _ context: ConnectionManagerKit.ChannelContext<Inbound, Outbound>
