@@ -221,7 +221,7 @@ final class ListenerDelegation: ListenerDelegate {
         #expect(tlsConfig.tlsOption === tlsOptions)
         #else
         let tlsConfig = TLSConfiguration.makeClientConfiguration()
-        let preKeyedConfig = TLSPreKeyedConfiguration(tlsConfiguration: tlsConfig!)
+        let preKeyedConfig = TLSPreKeyedConfiguration(tlsConfiguration: tlsConfig)
         #expect(preKeyedConfig.tlsConfiguration == tlsConfig)
         #endif
     }
@@ -647,7 +647,7 @@ final class MockConnectionDelegate: ConnectionDelegate {
                         let fc1 = await manager.connectionCache.findConnection(
                             cacheKey: server.cacheKey)
                         await #expect(fc1?.config.host == server.host)
-                        await manager.shutdown(cacheKey: server.cacheKey)
+                        await manager.gracefulShutdown()
                     }
                 }
             }
