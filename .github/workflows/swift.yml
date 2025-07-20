@@ -1,0 +1,54 @@
+# .github/workflows/swift.yml
+name: ConnectionManagerKit CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install libcurl4-openssl-dev
+
+      - name: Install Swift 6.1.0 with Swiftly
+        run: |
+          curl -O https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz
+          tar zxf swiftly-$(uname -m).tar.gz
+          ./swiftly init --quiet-shell-followup
+          source ~/.local/share/swiftly/env.sh
+          swiftly install --use 6.1.0
+          echo "Looking for Swift in toolchains directory..."
+          ls -la $HOME/.local/share/swiftly/toolchains/
+          SWIFT_PATH=$(find $HOME/.local/share/swiftly/toolchains/6.1.0 -name "swift" -type f 2>/dev/null | head -1)
+          if [ -n "$SWIFT_PATH" ]; then
+            SWIFT_PATH=$(dirname "$SWIFT_PATH")
+          else
+            echo "Swift not found in toolchains, using bin directory..."
+            SWIFT_PATH=$HOME/.local/share/swiftly/bin
+          fi
+          echo "SWIFT_PATH=$SWIFT_PATH" >> $GITHUB_ENV
+          echo "$SWIFT_PATH" >> $GITHUB_PATH
+
+      - name: Cache Swift packages
+        uses: actions/cache@v3
+        with:
+          path: .build
+          key: ${{ runner.os }}-swift-${{ hashFiles('Package.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-swift-
+
+      - name: Build
+        run: swift build --configuration release
+
+      - name: Test
+        run: swift test --configuration release
