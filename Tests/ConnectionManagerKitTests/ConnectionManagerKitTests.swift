@@ -54,7 +54,7 @@ final class ListenerDelegation: ListenerDelegate {
         let listener = ConnectionListener()
         let serverGroup = MultiThreadedEventLoopGroup.singleton
         let listenerDelegation = ListenerDelegation(shouldShutdown: false)
-        let conformer = MockConnectionDelegate(manager: ConnectionManager(), listenerDelegation: listenerDelegation)
+        let conformer = MockConnectionDelegate(manager: ConnectionManager<ByteBuffer, ByteBuffer>(), listenerDelegation: listenerDelegation)
         
         let config = try await listener.resolveAddress(
             .init(group: serverGroup, host: "localhost", port: 6668))
@@ -93,7 +93,7 @@ final class ListenerDelegation: ListenerDelegate {
     @Test("Connection manager should connect to multiple servers")
     func testCreateConnection() async throws {
         let endpoint = "localhost"
-        let manager = ConnectionManager()
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
         let listener = ConnectionListener()
         let serverGroup = MultiThreadedEventLoopGroup.singleton
         let listenerDelegation = ListenerDelegation(shouldShutdown: false)
@@ -142,7 +142,7 @@ final class ListenerDelegation: ListenerDelegate {
     
     @Test("Connection manager should handle connection failures gracefully")
     func testFailedCreateConnection() async throws {
-        let manager = ConnectionManager()
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
         let listener = ConnectionListener()
         let listenerDelegation = ListenerDelegation(shouldShutdown: false)
         let conformer = MockConnectionDelegate(manager: manager, listenerDelegation: listenerDelegation)
@@ -168,7 +168,7 @@ final class ListenerDelegation: ListenerDelegate {
     
     @Test("Connection manager should attempt reconnection with backoff")
     func testCreateConnectionFailedReconnect() async throws {
-        let manager = ConnectionManager()
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
         let conformer = MockConnectionDelegate(manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
         let contextDelegate = MockChannelContextDelegate()
         
@@ -191,7 +191,7 @@ final class ListenerDelegation: ListenerDelegate {
     
     @Test("Connection manager should handle TLS configuration")
     func testTLSConfiguration() async throws {
-        let manager = ConnectionManager()
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
         let conformer = MockConnectionDelegate(manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
         let contextDelegate = MockChannelContextDelegate()
         
@@ -216,7 +216,7 @@ final class ListenerDelegation: ListenerDelegate {
     
     @Test("Connection manager should handle graceful shutdown")
     func testGracefulShutdown() async throws {
-        let manager = ConnectionManager()
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
         
         // Test shouldReconnect property
         let shouldReconnect = await manager.shouldReconnect
@@ -234,7 +234,7 @@ final class ListenerDelegation: ListenerDelegate {
     
     @Test("Connection cache should store and retrieve connections")
     func testCreateCachedConnections() async {
-        let manager = ConnectionManager()
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
         let conformer = MockConnectionDelegate(
             manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
         let contextDelegate = MockChannelContextDelegate()
@@ -289,7 +289,7 @@ final class ListenerDelegation: ListenerDelegate {
     
     @Test("Connection cache should find connections by cache key")
     func testFindConnection() async throws {
-        let manager = ConnectionManager()
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
         let conformer = MockConnectionDelegate(
             manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
         let contextDelegate = MockChannelContextDelegate()
@@ -317,7 +317,7 @@ final class ListenerDelegation: ListenerDelegate {
     
     @Test("Connection cache should update existing connections")
     func testUpdateConnection() async throws {
-        let manager = ConnectionManager()
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
         let conformer = MockConnectionDelegate(
             manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
         let contextDelegate = MockChannelContextDelegate()
@@ -349,7 +349,7 @@ final class ListenerDelegation: ListenerDelegate {
     
     @Test("Connection cache should remove connections")
     func testDeleteConnection() async throws {
-        let manager = ConnectionManager()
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
         let conformer = MockConnectionDelegate(
             manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
         let contextDelegate = MockChannelContextDelegate()
@@ -371,7 +371,7 @@ final class ListenerDelegation: ListenerDelegate {
     
     @Test("Connection cache should remove all connections")
     func testRemoveAllConnections() async throws {
-        let manager = ConnectionManager()
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
         let conformer = MockConnectionDelegate(
             manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
         let contextDelegate = MockChannelContextDelegate()
@@ -404,7 +404,7 @@ final class ListenerDelegation: ListenerDelegate {
     
     @Test("Connection cache should fetch all connections")
     func testFetchAllConnections() async throws {
-        let manager = ConnectionManager()
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
         let conformer = MockConnectionDelegate(
             manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
         let contextDelegate = MockChannelContextDelegate()
@@ -527,9 +527,9 @@ final class MockConnectionDelegate: ConnectionDelegate {
     nonisolated(unsafe) var networkEventTask: Task<Void, Never>?
     nonisolated(unsafe) var inactiveTask: Task<Void, Never>?
     nonisolated(unsafe) var errorTask: Task<Void, Never>?
-    let manager: ConnectionManager
+    let manager: ConnectionManager<ByteBuffer, ByteBuffer>
     
-    init(manager: ConnectionManager, listenerDelegation: ListenerDelegation) {
+    init(manager: ConnectionManager<ByteBuffer, ByteBuffer>, listenerDelegation: ListenerDelegation) {
         self.manager = manager
         self.listenerDelegation = listenerDelegation
     }

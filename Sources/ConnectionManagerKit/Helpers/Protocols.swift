@@ -30,7 +30,7 @@ protocol ChildChannelServiceDelegate: Sendable {
     /// Called when a child channel has been initialized and is ready for use.
     ///
     /// - Parameter context: The channel context containing the initialized channel and its metadata.
-    func initializedChildChannel<Outbound, Inbound>(_ context: ChannelContext<Inbound, Outbound>) async where Outbound : Sendable, Inbound : Sendable
+    func initializedChildChannel<Outbound: Sendable, Inbound: Sendable>(_ context: ChannelContext<Inbound, Outbound>) async where Outbound : Sendable, Inbound : Sendable
 }
 
 /// A protocol for handling connection-level events and network state changes.
