@@ -112,7 +112,12 @@ class MyConnectionManagerDelegate: ConnectionManagerDelegate {
 
 ```swift
 class MyServer {
-    let listener = ConnectionListener()
+    // Using the generic type directly
+    let listener = ConnectionListener<ByteBuffer, ByteBuffer>()
+    
+    // Or using the convenience method for ByteBuffer types
+    // let listener = ConnectionListener.byteBuffer()
+    
     let connectionDelegate = MyConnectionDelegate()
     let listenerDelegate = MyListenerDelegate()
     
@@ -184,6 +189,41 @@ class MyTLSListenerDelegate: ListenerDelegate {
             LengthFieldPrepender(lengthFieldBitLength: .fourBytes),
             MyProtocolHandler()
         ]
+    }
+}
+```
+
+### Custom Types
+
+```swift
+// Define custom message types
+struct ChatMessage: Sendable {
+    let sender: String
+    let content: String
+    let timestamp: Date
+}
+
+class MyCustomServer {
+    // Use custom types with ConnectionListener
+    let listener = ConnectionListener<ChatMessage, ChatMessage>()
+    let connectionDelegate = MyConnectionDelegate()
+    let listenerDelegate = MyListenerDelegate()
+    
+    func startServer() async throws {
+        let config = try await listener.resolveAddress(
+            .init(
+                group: MultiThreadedEventLoopGroup.singleton,
+                host: "0.0.0.0",
+                port: 8080
+            )
+        )
+        
+        try await listener.listen(
+            address: config.address!,
+            configuration: config,
+            delegate: connectionDelegate,
+            listenerDelegate: listenerDelegate
+        )
     }
 }
 ```

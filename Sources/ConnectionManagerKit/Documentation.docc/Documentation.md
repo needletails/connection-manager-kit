@@ -56,7 +56,7 @@ await manager.gracefulShutdown()
 import ConnectionManagerKit
 
 // Create a connection listener
-let listener = ConnectionListener()
+let listener = ConnectionListener<ByteBuffer, ByteBuffer>()
 
 // Resolve server address
 let config = try await listener.resolveAddress(

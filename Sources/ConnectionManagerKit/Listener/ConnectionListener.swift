@@ -13,12 +13,12 @@ import ServiceLifecycle
 import NeedleTailLogger
 import Logging
 
-public actor ConnectionListener: ServiceListenerDelegate {
+public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceListenerDelegate {
     
     public var serviceGroup: ServiceGroup?
     public var delegate: ConnectionDelegate?
     nonisolated(unsafe) public var listenerDelegate: ListenerDelegate?
-    var serverService: ServerService<ByteBuffer, ByteBuffer>?
+    var serverService: ServerService<Inbound, Outbound>?
     let logger: NeedleTailLogger
     
     nonisolated func retrieveSSLHandler() -> NIOSSL.NIOSSLServerHandler? {
@@ -36,6 +36,11 @@ public actor ConnectionListener: ServiceListenerDelegate {
     
     public init(logger: NeedleTailLogger = NeedleTailLogger(.init(label: "[Connection Listener]"))) {
         self.logger = logger
+    }
+    
+    /// Convenience initializer for ByteBuffer types (most common use case)
+    public static func byteBuffer(logger: NeedleTailLogger = NeedleTailLogger(.init(label: "[Connection Listener]"))) -> ConnectionListener<ByteBuffer, ByteBuffer> {
+        return ConnectionListener<ByteBuffer, ByteBuffer>(logger: logger)
     }
     
     public func resolveAddress(_ configuration: Configuration) throws -> Configuration {
@@ -71,7 +76,7 @@ public actor ConnectionListener: ServiceListenerDelegate {
         self.delegate = delegate
         self.listenerDelegate = listenerDelegate
         
-        let serverService = ServerService<ByteBuffer, ByteBuffer>(
+        let serverService = ServerService<Inbound, Outbound>(
             address: address,
             configuration: configuration,
             logger: logger,
@@ -97,7 +102,7 @@ public actor ConnectionListener: ServiceListenerDelegate {
 
 
 extension ConnectionListener: ChildChannelServiceDelegate {
-    func initializedChildChannel<Outbound, Inbound>(_ context: ChannelContext<Inbound, Outbound>) async where Outbound : Sendable, Inbound : Sendable {
+    func initializedChildChannel<OutboundType, InboundType>(_ context: ChannelContext<InboundType, OutboundType>) async where OutboundType : Sendable, InboundType : Sendable {
         await delegate?.initializedChildChannel(context)
     }
 }

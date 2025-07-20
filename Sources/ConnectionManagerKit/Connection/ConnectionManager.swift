@@ -368,7 +368,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     ///   - timeout: The timeout duration for the connection.
     ///   - tlsPreKeyed: Optional pre-configured TLS settings.
     ///
-    /// - Returns: An `NIOAsyncChannel<ByteBuffer, ByteBuffer>` representing the established connection.
+    /// - Returns: An `NIOAsyncChannel<Inbound, Outbound>` representing the established connection.
     /// - Throws: An error if the connection cannot be established.
     private func createConnection(
         server: ServerLocation,
@@ -378,7 +378,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     ) async throws -> NIOAsyncChannel<Inbound, Outbound> {
         
         #if !canImport(Network)
-        func socketChannelCreator(tlsPreKeyed: TLSPreKeyedConfiguration? = nil) async throws -> NIOAsyncChannel<ByteBuffer, ByteBuffer> {
+        func socketChannelCreator(tlsPreKeyed: TLSPreKeyedConfiguration? = nil) async throws -> NIOAsyncChannel<Inbound, Outbound> {
             var tlsConfiguration = tlsPreKeyed?.tlsConfiguration
             if tlsPreKeyed == nil {
                 tlsConfiguration = TLSConfiguration.makeClientConfiguration()
