@@ -14,7 +14,7 @@ This guide covers the most common usage patterns for ConnectionManagerKit, inclu
 import ConnectionManagerKit
 
 class MyApp {
-    let manager = ConnectionManager()
+    let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
     let connectionDelegate = MyConnectionDelegate()
     let contextDelegate = MyChannelContextDelegate()
     
@@ -95,7 +95,7 @@ class MyConnectionManagerDelegate: ConnectionManagerDelegate {
     }
     
     func deliverChannel(_ channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>, 
-                       manager: ConnectionManager, 
+                       manager: ConnectionManager<ByteBuffer, ByteBuffer>, 
                        cacheKey: String) async {
         await manager.setDelegates(
             connectionDelegate: connectionDelegate,
@@ -112,12 +112,7 @@ class MyConnectionManagerDelegate: ConnectionManagerDelegate {
 
 ```swift
 class MyServer {
-    // Using the generic type directly
     let listener = ConnectionListener<ByteBuffer, ByteBuffer>()
-    
-    // Or using the convenience method for ByteBuffer types
-    // let listener = ConnectionListener.byteBuffer()
-    
     let connectionDelegate = MyConnectionDelegate()
     let listenerDelegate = MyListenerDelegate()
     
@@ -350,7 +345,7 @@ class MyConnectionDelegate: ConnectionDelegate {
 
 ```swift
 class MyApp {
-    let manager = ConnectionManager()
+    let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
     
     func shutdown() async {
         // Trigger graceful shutdown
@@ -372,6 +367,55 @@ class MyApp {
         }
     }
 }
+```
+
+## Connection Pooling and Caching (Accurate API)
+
+### Using CacheConfiguration and ConnectionPoolConfiguration
+
+```swift
+let cacheConfig = CacheConfiguration(
+    maxConnections: 50,
+    ttl: .seconds(300),
+    enableLRU: true
+)
+
+let poolConfig = ConnectionPoolConfiguration(
+    minConnections: 2,
+    maxConnections: 20,
+    acquireTimeout: .seconds(10),
+    maxIdleTime: .seconds(60)
+)
+
+let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
+
+// Acquire a connection from the pool (factory closure required)
+let acquiredConnection = try await manager.connectionCache.acquireConnection(
+    for: "api-server",
+    poolConfig: poolConfig
+) {
+    // Connection factory: create and return a new ChildChannelService if needed
+    // Example:
+    return ChildChannelService<ByteBuffer, ByteBuffer>(
+        logger: .init(),
+        config: .init(
+            host: "api.example.com",
+            port: 443,
+            enableTLS: true,
+            cacheKey: "api-server",
+            delegate: connectionDelegate,
+            contextDelegate: contextDelegate
+        ),
+        childChannel: nil,
+        delegate: manager
+    )
+}
+
+// Return the connection to the pool
+await manager.connectionCache.returnConnection(
+    "api-server",
+    poolConfig: poolConfig
+)
 ```
 
 ## Error Handling
@@ -477,10 +521,10 @@ class MyChannelContextDelegate: ChannelContextDelegate {
 
 ```swift
 class MyApp {
-    private var manager: ConnectionManager?
+    private var manager: ConnectionManager<ByteBuffer, ByteBuffer>?
     
     func start() async throws {
-        manager = ConnectionManager()
+        manager = ConnectionManager<ByteBuffer, ByteBuffer>()
         // ... setup and connect
     }
     
@@ -497,6 +541,124 @@ class MyApp {
     }
 }
 ```
+
+## Metrics and Logging Strategy
+
+The ConnectionManagerKit provides real-time metrics updates through delegation patterns, focusing on the most valuable operational metrics.
+
+### Core Metrics Components
+
+**Public Metrics APIs:**
+- **ConnectionListener**: Server-side connection performance and health
+- **ConnectionCache**: Cache efficiency and resource utilization  
+- **ConnectionManager**: Client-side connection establishment and management
+
+**Internal Metrics:**
+- **ServerService**: Internal server implementation details (not exposed publicly)
+
+### Using the Delegation Pattern
+
+```swift
+class MyConnectionManager: ListenerMetricsDelegate, ConnectionCacheMetricsDelegate, ConnectionManagerMetricsDelegate {
+    private let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
+    private let listener = ConnectionListener<ByteBuffer, ByteBuffer>()
+    private let logger = NeedleTailLogger()
+    
+    func setupMetricsDelegation() {
+        // Set up delegation for real-time updates
+        listener.metricsDelegate = self
+        manager.connectionCache.metricsDelegate = self
+        manager.metricsDelegate = self
+    }
+    
+    // MARK: - ListenerMetricsDelegate (Server-side)
+    
+    func listenerMetricsDidUpdate(_ metrics: ListenerMetrics) {
+        logger.info("Server: \(metrics.activeConnections) active connections")
+        
+        if metrics.activeConnections > 100 {
+            logger.warning("High server connection count: \(metrics.activeConnections)")
+        }
+    }
+    
+    func connectionDidAccept(connectionId: String, activeConnections: Int) {
+        logger.debug("Server accepted connection: \(connectionId)")
+    }
+    
+    func connectionDidClose(connectionId: String, activeConnections: Int, duration: TimeAmount) {
+        logger.debug("Server closed connection: \(connectionId), duration: \(duration.nanoseconds / 1_000_000_000)s")
+    }
+    
+    func recoveryDidAttempt(attemptNumber: Int, maxAttempts: Int) {
+        logger.warning("Server recovery attempt \(attemptNumber)/\(maxAttempts)")
+    }
+    
+    // MARK: - ConnectionCacheMetricsDelegate (Cache Performance)
+    
+    func cacheMetricsDidUpdate(cachedConnections: Int, maxConnections: Int, lruEnabled: Bool, ttlEnabled: Bool) {
+        logger.debug("Cache: \(cachedConnections)/\(maxConnections) connections")
+    }
+    
+    func cacheHitDidOccur(cacheKey: String) {
+        logger.trace("Cache hit: \(cacheKey)")
+    }
+    
+    func cacheMissDidOccur(cacheKey: String) {
+        logger.debug("Cache miss: \(cacheKey)")
+    }
+    
+    func connectionDidEvict(cacheKey: String) {
+        logger.info("Cache evicted: \(cacheKey)")
+    }
+    
+    func connectionDidExpire(cacheKey: String) {
+        logger.info("Cache expired: \(cacheKey)")
+    }
+    
+    // MARK: - ConnectionManagerMetricsDelegate (Client-side)
+    
+    func connectionManagerMetricsDidUpdate(totalConnections: Int, activeConnections: Int, failedConnections: Int, averageConnectionTime: TimeAmount) {
+        logger.info("Client: \(activeConnections)/\(totalConnections) connections active")
+        
+        if failedConnections > 10 {
+            logger.warning("High client failure rate: \(failedConnections) failures")
+        }
+    }
+    
+    func connectionDidFail(serverLocation: String, error: Error, attemptNumber: Int) {
+        logger.error("Client failed to connect to \(serverLocation): \(error) (attempt \(attemptNumber))")
+    }
+    
+    func connectionDidSucceed(serverLocation: String, connectionTime: TimeAmount) {
+        logger.debug("Client connected to \(serverLocation) in \(connectionTime.nanoseconds / 1_000_000_000)s")
+    }
+    
+    func parallelConnectionDidComplete(totalAttempted: Int, successful: Int, failed: Int) {
+        logger.info("Parallel connections: \(successful)/\(totalAttempted) successful")
+    }
+}
+```
+
+### Metrics Strategy Benefits
+
+- **Focused Value**: Only expose metrics that provide operational value
+- **Clear Separation**: Server-side vs client-side vs cache metrics
+- **Performance**: Real-time updates without polling overhead
+- **Flexibility**: Choose which metrics to handle and how to log them
+
+### Alternative: Polling (Still Available)
+
+```swift
+// Get current metrics
+let listenerMetrics = await listener.getCurrentMetrics()
+let cacheMetrics = await manager.connectionCache.getCurrentMetrics()
+
+// Get formatted strings
+let listenerString = await listener.getFormattedMetrics()
+let cacheString = await manager.connectionCache.getFormattedMetrics()
+```
+
+The delegation pattern is recommended for production use as it provides better performance and real-time responsiveness.
 
 ## Next Steps
 

@@ -7,6 +7,45 @@ import NIOPosix
 import NIOSSL
 import ServiceLifecycle
 import NeedleTailLogger
+import Metrics
+
+/// Delegate protocol for receiving connection manager metrics updates
+public protocol ConnectionManagerMetricsDelegate: AnyObject, Sendable {
+    /// Called when connection manager metrics are updated
+    /// - Parameters:
+    ///   - totalConnections: Total number of connections managed
+    ///   - activeConnections: Number of currently active connections
+    ///   - failedConnections: Number of failed connection attempts
+    ///   - averageConnectionTime: Average time to establish connections
+    func connectionManagerMetricsDidUpdate(totalConnections: Int, activeConnections: Int, failedConnections: Int, averageConnectionTime: TimeAmount)
+    
+    /// Called when a connection attempt fails
+    /// - Parameters:
+    ///   - serverLocation: The server location that failed
+    ///   - error: The error that occurred
+    ///   - attemptNumber: The attempt number
+    func connectionDidFail(serverLocation: String, error: Error, attemptNumber: Int)
+    
+    /// Called when a connection is successfully established
+    /// - Parameters:
+    ///   - serverLocation: The server location that succeeded
+    ///   - connectionTime: Time taken to establish the connection
+    func connectionDidSucceed(serverLocation: String, connectionTime: TimeAmount)
+    
+    /// Called when parallel connection operations complete
+    /// - Parameters:
+    ///   - totalAttempted: Total connections attempted
+    ///   - successful: Number of successful connections
+    ///   - failed: Number of failed connections
+    func parallelConnectionDidComplete(totalAttempted: Int, successful: Int, failed: Int)
+}
+
+/// Default implementation for optional delegate methods
+public extension ConnectionManagerMetricsDelegate {
+    func connectionDidFail(serverLocation: String, error: Error, attemptNumber: Int) {}
+    func connectionDidSucceed(serverLocation: String, connectionTime: TimeAmount) {}
+    func parallelConnectionDidComplete(totalAttempted: Int, successful: Int, failed: Int) {}
+}
 #if canImport(Network)
 import Network
 import NIOTransportServices
@@ -103,6 +142,16 @@ public protocol ConnectionManagerDelegate: AnyObject, Sendable {
     func deliverChannel(_ channel: NIOAsyncChannel<Inbound, Outbound>, manager: ConnectionManager<Inbound, Outbound>, cacheKey: String) async
 }
 
+/// Configuration for connection retry strategies.
+public enum RetryStrategy: Sendable {
+    /// Fixed delay between retries.
+    case fixed(delay: TimeAmount)
+    /// Exponential backoff with optional jitter.
+    case exponential(initialDelay: TimeAmount, multiplier: Double = 2.0, maxDelay: TimeAmount, jitter: Bool = true)
+    /// Custom retry strategy.
+    case custom(@Sendable (_ attempt: Int, _ maxAttempts: Int) -> TimeAmount)
+}
+
 /// A manager responsible for handling network connections, including establishing, caching, and monitoring connections.
 ///
 /// `ConnectionManager` provides a high-level interface for managing multiple network connections with automatic
@@ -135,7 +184,8 @@ public protocol ConnectionManagerDelegate: AnyObject, Sendable {
 /// try await manager.connect(
 ///     to: servers,
 ///     maxReconnectionAttempts: 5,
-///     timeout: .seconds(10)
+///     timeout: .seconds(10),
+///     retryStrategy: .exponential(initialDelay: .seconds(1), maxDelay: .seconds(30))
 /// )
 /// 
 /// // Later, when shutting down
@@ -163,12 +213,150 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     /// The delegate must have matching generic types.
     nonisolated(unsafe) public weak var delegate: (any ConnectionManagerDelegate)?
     
+    /// A weak reference to the metrics delegate for receiving connection manager updates.
+    public weak var metricsDelegate: ConnectionManagerMetricsDelegate?
+    
+    // MARK: - Metrics Tracking
+    
+    // Swift Metrics for external monitoring
+    private let totalConnectionsGauge = Gauge(label: "connection_manager_total_connections", dimensions: [("component", "connection_manager")])
+    private let activeConnectionsGauge = Gauge(label: "connection_manager_active_connections", dimensions: [("component", "connection_manager")])
+    private let failedConnectionsCounter = Counter(label: "connection_manager_failed_connections", dimensions: [("component", "connection_manager")])
+    private let successfulConnectionsCounter = Counter(label: "connection_manager_successful_connections", dimensions: [("component", "connection_manager")])
+    private let averageConnectionTimeGauge = Gauge(label: "connection_manager_average_connection_time_ns", dimensions: [("component", "connection_manager")])
+    private let connectionAttemptsCounter = Counter(label: "connection_manager_connection_attempts", dimensions: [("component", "connection_manager")])
+    
+    // Minimal state for internal calculations and delegate notifications
+    private var connectionTimes: [TimeAmount] = []
+    private var failedConnectionsCount: Int = 0
+    
+    // MARK: - Metrics Helper Methods
+    
+    /// Updates metrics when a connection attempt is made
+    private func updateMetricsOnConnectionAttempt() {
+        connectionAttemptsCounter.increment()
+    }
+    
+    /// Updates metrics when a connection succeeds
+    private func updateMetricsOnConnectionSuccess(serverLocation: String, connectionTime: TimeAmount) {
+        connectionTimes.append(connectionTime)
+        
+        // Update Swift Metrics
+        totalConnectionsGauge.record(Double(connectionTimes.count))
+        activeConnectionsGauge.record(Double(connectionTimes.count))
+        successfulConnectionsCounter.increment()
+        
+        // Calculate and record average connection time
+        let totalTime = connectionTimes.reduce(TimeAmount.seconds(0)) { $0 + $1 }
+        let averageTime = totalTime.nanoseconds / Int64(connectionTimes.count)
+        averageConnectionTimeGauge.record(Double(averageTime))
+        
+        // Notify delegate with calculated values
+        let totalConnections = connectionTimes.count
+        let activeConnections = connectionTimes.count
+        let failedConnections = failedConnectionsCount
+        
+        metricsDelegate?.connectionDidSucceed(serverLocation: serverLocation, connectionTime: connectionTime)
+        metricsDelegate?.connectionManagerMetricsDidUpdate(
+            totalConnections: totalConnections,
+            activeConnections: activeConnections,
+            failedConnections: failedConnections,
+            averageConnectionTime: .nanoseconds(averageTime)
+        )
+    }
+    
+    /// Updates metrics when a connection fails
+    private func updateMetricsOnConnectionFailure(serverLocation: String, error: Error, attemptNumber: Int) {
+        failedConnectionsCount += 1
+        
+        // Update Swift Metrics
+        failedConnectionsCounter.increment()
+        
+        // Notify delegate with calculated values
+        let totalConnections = connectionTimes.count
+        let activeConnections = connectionTimes.count
+        let failedConnections = failedConnectionsCount
+        let averageTime = connectionTimes.isEmpty ? 0 : connectionTimes.reduce(TimeAmount.seconds(0)) { $0 + $1 }.nanoseconds / Int64(connectionTimes.count)
+        
+        metricsDelegate?.connectionDidFail(serverLocation: serverLocation, error: error, attemptNumber: attemptNumber)
+        metricsDelegate?.connectionManagerMetricsDidUpdate(
+            totalConnections: totalConnections,
+            activeConnections: activeConnections,
+            failedConnections: failedConnections,
+            averageConnectionTime: .nanoseconds(averageTime)
+        )
+    }
+    
+    /// Updates metrics when a connection is closed
+    internal func updateMetricsOnConnectionClose() {
+        // Update Swift Metrics (decrement active connections)
+        let newActiveCount = max(0, connectionTimes.count - 1)
+        activeConnectionsGauge.record(Double(newActiveCount))
+        
+        // Notify delegate with calculated values
+        let totalConnections = connectionTimes.count
+        let activeConnections = newActiveCount
+        let failedConnections = failedConnectionsCount
+        let averageTime = connectionTimes.isEmpty ? 0 : connectionTimes.reduce(TimeAmount.seconds(0)) { $0 + $1 }.nanoseconds / Int64(connectionTimes.count)
+        
+        metricsDelegate?.connectionManagerMetricsDidUpdate(
+            totalConnections: totalConnections,
+            activeConnections: activeConnections,
+            failedConnections: failedConnections,
+            averageConnectionTime: .nanoseconds(averageTime)
+        )
+    }
+    
+    /// Resets all metrics counters
+    public func resetMetrics() {
+        connectionTimes.removeAll()
+        failedConnectionsCount = 0
+        
+        // Reset Swift Metrics (note: Swift Metrics doesn't have a reset method, so we set to 0)
+        totalConnectionsGauge.record(0)
+        activeConnectionsGauge.record(0)
+        averageConnectionTimeGauge.record(0)
+    }
+    
+    /// Returns current metrics for consumer logging/processing
+    public func getCurrentMetrics() -> (totalConnections: Int, activeConnections: Int, failedConnections: Int, averageConnectionTime: TimeAmount) {
+        let totalConnections = connectionTimes.count
+        let activeConnections = connectionTimes.count
+        let failedConnections = failedConnectionsCount
+        let averageTime = connectionTimes.isEmpty ? 0 : connectionTimes.reduce(TimeAmount.seconds(0)) { $0 + $1 }.nanoseconds / Int64(connectionTimes.count)
+        
+        return (
+            totalConnections: totalConnections,
+            activeConnections: activeConnections,
+            failedConnections: failedConnections,
+            averageConnectionTime: .nanoseconds(averageTime)
+        )
+    }
+    
+    /// Returns formatted metrics string for consumer logging
+    public func getFormattedMetrics() -> String {
+        let metrics = getCurrentMetrics()
+        return """
+        Connection Manager Metrics:
+        - Total Connections: \(metrics.totalConnections)
+        - Active Connections: \(metrics.activeConnections)
+        - Failed Connections: \(metrics.failedConnections)
+        - Average Connection Time: \(metrics.averageConnectionTime.nanoseconds / 1_000_000_000)s
+        """
+    }
+    
     /// Sets the delegate with proper type safety.
     /// 
     /// This method ensures that the delegate has matching generic types.
     /// - Parameter delegate: The delegate to set, must have matching Inbound and Outbound types.
     public func setDelegate<D: ConnectionManagerDelegate>(_ delegate: D) where D.Inbound == Inbound, D.Outbound == Outbound {
         self.delegate = delegate
+    }
+    
+    /// Sets the metrics delegate for receiving connection manager metrics updates.
+    /// - Parameter metricsDelegate: The metrics delegate to set.
+    public func setMetricsDelegate(_ metricsDelegate: ConnectionManagerMetricsDelegate?) {
+        self.metricsDelegate = metricsDelegate
     }
     
     /// Internal flag for controlling reconnection behavior.
@@ -201,6 +389,63 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         #else
         self.group = MultiThreadedEventLoopGroup.singleton
         #endif
+        
+        // Set up callback to update metrics when connections are removed from cache
+        Task {
+            await connectionCache.setConnectionRemovedCallback { [weak self] in
+                Task { [weak self] in
+                    await self?.updateMetricsOnConnectionClose()
+                }
+            }
+        }
+    }
+    
+    /// Connects to a list of server locations with advanced configuration options.
+    ///
+    /// This method provides advanced configuration options while maintaining backward compatibility.
+    /// Use this method when you need custom retry strategies or other advanced features.
+    ///
+    /// - Parameters:
+    ///   - servers: An array of `ServerLocation` instances to connect to.
+    ///   - maxReconnectionAttempts: The maximum number of reconnection attempts for each server. Default is 6.
+    ///   - timeout: The timeout duration for each connection attempt. Default is 10 seconds.
+    ///   - tlsPreKeyed: Optional pre-configured TLS settings to use for all connections.
+    ///   - retryStrategy: The retry strategy to use for failed connections.
+    ///
+    /// - Throws: An error if all connection attempts fail after the maximum number of retries.
+    ///
+    /// ## Example
+    /// ```swift
+    /// let servers = [
+    ///     ServerLocation(host: "server1.example.com", port: 443, enableTLS: true, cacheKey: "server1"),
+    ///     ServerLocation(host: "server2.example.com", port: 8080, enableTLS: false, cacheKey: "server2")
+    /// ]
+    /// 
+    /// try await manager.connect(
+    ///     to: servers,
+    ///     maxReconnectionAttempts: 5,
+    ///     timeout: .seconds(15),
+    ///     retryStrategy: .exponential(initialDelay: .seconds(1), maxDelay: .seconds(30))
+    /// )
+    /// ```
+    public func connect(
+        to servers: [ServerLocation],
+        maxReconnectionAttempts: Int = 6,
+        timeout: TimeAmount = .seconds(10),
+        tlsPreKeyed: TLSPreKeyedConfiguration? = nil,
+        retryStrategy: RetryStrategy
+    ) async throws {
+        for await server in servers.async {
+            try await attemptConnection(
+                to: server,
+                currentAttempt: 0,
+                maxAttempts: maxReconnectionAttempts,
+                timeout: timeout,
+                tlsPreKeyed: tlsPreKeyed,
+                retryStrategy: retryStrategy)
+        }
+        
+        // Connections are managed individually through the connection cache
     }
     
     /// Sets the delegates for connection and context handling.
@@ -272,25 +517,25 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         timeout: TimeAmount = .seconds(10),
         tlsPreKeyed: TLSPreKeyedConfiguration? = nil
     ) async throws {
+        // Use default retry strategy for backward compatibility
+        let retryStrategy: RetryStrategy = .fixed(delay: .seconds(5))
         for await server in servers.async {
             try await attemptConnection(
                 to: server,
                 currentAttempt: 0,
                 maxAttempts: maxReconnectionAttempts,
                 timeout: timeout,
-                tlsPreKeyed: tlsPreKeyed)
+                tlsPreKeyed: tlsPreKeyed,
+                retryStrategy: retryStrategy)
         }
         
-        serviceGroup = await ServiceGroup(
-            services: connectionCache.fetchAllConnections(),
-            logger: .init(label: "Connection Manager"))
-        try await serviceGroup?.run()
+        // Connections are managed individually through the connection cache
     }
     
     /// Attempts to connect to a specified server with retry logic.
     ///
     /// This private method implements the retry logic for connection attempts. It will retry failed
-    /// connections with a 5-second delay between attempts until the maximum number of attempts is reached.
+    /// connections according to the specified retry strategy until the maximum number of attempts is reached.
     ///
     /// - Parameters:
     ///   - server: The `ServerLocation` to connect to.
@@ -298,6 +543,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     ///   - maxAttempts: The maximum number of attempts allowed.
     ///   - timeout: The timeout duration for the connection.
     ///   - tlsPreKeyed: Optional pre-configured TLS settings.
+    ///   - retryStrategy: The retry strategy to use for failed connections.
     ///
     /// - Throws: An error if the connection fails after all retry attempts.
     private func attemptConnection(
@@ -305,8 +551,14 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         currentAttempt: Int,
         maxAttempts: Int,
         timeout: TimeAmount,
-        tlsPreKeyed: TLSPreKeyedConfiguration? = nil
+        tlsPreKeyed: TLSPreKeyedConfiguration? = nil,
+        retryStrategy: RetryStrategy
     ) async throws {
+        // Track connection attempt
+        updateMetricsOnConnectionAttempt()
+        
+        let startTime = TimeAmount.now
+        
         do {
             // Attempt to create a connection
             let childChannel: NIOAsyncChannel<Inbound, Outbound> = try await createConnection(
@@ -314,6 +566,9 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                 group: self.group,
                 timeout: timeout,
                 tlsPreKeyed: tlsPreKeyed)
+            
+            let connectionTime = TimeAmount.now - startTime
+            
             await connectionCache.cacheConnection(
                 .init(
                     logger: logger,
@@ -321,33 +576,68 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                     childChannel: childChannel,
                     delegate: self), for: server.cacheKey)
             
-            // Note: Delegate call is commented out due to generic type constraints
-            // The delegate should be called by the consumer after connection establishment
-            // Use the setDelegate method to ensure type safety, then call the delegate manually
-            // await delegate?.deliverChannel(childChannel, manager: self, cacheKey: server.cacheKey)
-            
             let monitor = try await childChannel.channel.pipeline.handler(type: NetworkEventMonitor.self).get()
             if let foundConnection = await connectionCache.findConnection(cacheKey: server.cacheKey) {
                 await delegateMonitorEvents(monitor: monitor, server: foundConnection.config)
             }
+            
+            // Track successful connection
+            updateMetricsOnConnectionSuccess(serverLocation: server.cacheKey, connectionTime: connectionTime)
+            
         } catch {
+            // Track failed connection
+            updateMetricsOnConnectionFailure(serverLocation: server.cacheKey, error: error, attemptNumber: currentAttempt + 1)
+            
             // If the connection fails
             logger.log(level: .error, message: "Failed to connect to the server. Attempt: \(currentAttempt + 1) of \(maxAttempts)")
             
             if currentAttempt < maxAttempts - 1 {
-                // Recursively attempt to connect again after a delay
-                try await Task.sleep(until: .now + .seconds(5))
+                // Calculate delay based on retry strategy
+                let delay = calculateRetryDelay(strategy: retryStrategy, attempt: currentAttempt, maxAttempts: maxAttempts)
+                
+                // Recursively attempt to connect again after the calculated delay
+                try await Task.sleep(for: Duration.nanoseconds(delay.nanoseconds))
                 try await attemptConnection(
                     to: server,
                     currentAttempt: currentAttempt + 1,
                     maxAttempts: maxAttempts,
                     timeout: timeout,
-                    tlsPreKeyed: tlsPreKeyed)
+                    tlsPreKeyed: tlsPreKeyed,
+                    retryStrategy: retryStrategy)
             } else {
                 _shouldReconnect = false
                 // If max attempts reached, rethrow the error
                 throw error
             }
+        }
+    }
+    
+    /// Calculates the delay for the next retry attempt based on the retry strategy.
+    ///
+    /// - Parameters:
+    ///   - strategy: The retry strategy to use.
+    ///   - attempt: The current attempt number (0-based).
+    ///   - maxAttempts: The maximum number of attempts allowed.
+    /// - Returns: The calculated delay for the next retry attempt.
+    private func calculateRetryDelay(strategy: RetryStrategy, attempt: Int, maxAttempts: Int) -> TimeAmount {
+        switch strategy {
+        case .fixed(let delay):
+            return delay
+            
+        case .exponential(let initialDelay, let multiplier, let maxDelay, let jitter):
+            let baseDelay = Double(initialDelay.nanoseconds) * pow(multiplier, Double(attempt))
+            let cappedDelay = min(baseDelay, Double(maxDelay.nanoseconds))
+            
+            if jitter {
+                // Add jitter to prevent thundering herd problem
+                let jitterAmount = cappedDelay * 0.1 * Double.random(in: -1...1)
+                return .nanoseconds(Int64(cappedDelay + jitterAmount))
+            } else {
+                return .nanoseconds(Int64(cappedDelay))
+            }
+            
+        case .custom(let calculator):
+            return calculator(attempt, maxAttempts)
         }
     }
     
@@ -504,6 +794,8 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         do {
             await serviceGroup?.triggerGracefulShutdown()
             try await connectionCache.removeAllConnection()
+            // Update metrics after removing all connections
+            updateMetricsOnConnectionClose()
             logger.log(level: .info, message: "Gracefully shut down service and removed connections from cache.")
         } catch {
             logger.log(level: .error, message: "Error shutting down connection group: \(error)")
@@ -511,5 +803,158 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         }
         serviceGroup = nil
         _shouldReconnect = false
+    }
+
+    /// Connects to a list of server locations with parallel processing.
+    ///
+    /// This method attempts to establish connections to all provided servers in parallel,
+    /// which can significantly improve performance when connecting to multiple servers.
+    /// It maintains the same retry logic and error handling as the sequential version.
+    ///
+    /// - Parameters:
+    ///   - servers: An array of `ServerLocation` instances to connect to.
+    ///   - maxReconnectionAttempts: The maximum number of reconnection attempts for each server. Default is 6.
+    ///   - timeout: The timeout duration for each connection attempt. Default is 10 seconds.
+    ///   - tlsPreKeyed: Optional pre-configured TLS settings to use for all connections.
+    ///   - maxConcurrentConnections: Maximum number of concurrent connection attempts. Default is 4.
+    ///
+    /// - Throws: An error if all connection attempts fail after the maximum number of retries.
+    ///
+    /// ## Example
+    /// ```swift
+    /// let servers = [
+    ///     ServerLocation(host: "server1.example.com", port: 443, enableTLS: true, cacheKey: "server1"),
+    ///     ServerLocation(host: "server2.example.com", port: 8080, enableTLS: false, cacheKey: "server2"),
+    ///     ServerLocation(host: "server3.example.com", port: 443, enableTLS: true, cacheKey: "server3")
+    /// ]
+    /// 
+    /// try await manager.connectParallel(
+    ///     to: servers,
+    ///     maxReconnectionAttempts: 5,
+    ///     timeout: .seconds(15),
+    ///     maxConcurrentConnections: 3
+    /// )
+    /// ```
+    public func connectParallel(
+        to servers: [ServerLocation],
+        maxReconnectionAttempts: Int = 6,
+        timeout: TimeAmount = .seconds(10),
+        tlsPreKeyed: TLSPreKeyedConfiguration? = nil,
+        maxConcurrentConnections: Int = 4
+    ) async throws {
+        // Use default retry strategy for backward compatibility
+        let retryStrategy: RetryStrategy = .fixed(delay: .seconds(5))
+        
+        let totalAttempted = servers.count
+        var successful = 0
+        var failed = 0
+        
+        try await withThrowingTaskGroup(of: (success: Bool, error: Error?).self) { group in
+            var activeConnections = 0
+            var serverIndex = 0
+            
+            while serverIndex < servers.count || activeConnections > 0 {
+                // Start new connections up to the concurrency limit
+                while activeConnections < maxConcurrentConnections && serverIndex < servers.count {
+                    let server = servers[serverIndex]
+                    serverIndex += 1
+                    activeConnections += 1
+                    
+                    group.addTask { [weak self] in
+                        guard let self else { return (success: false, error: nil) }
+                        do {
+                            try await self.attemptConnection(
+                                to: server,
+                                currentAttempt: 0,
+                                maxAttempts: maxReconnectionAttempts,
+                                timeout: timeout,
+                                tlsPreKeyed: tlsPreKeyed,
+                                retryStrategy: retryStrategy)
+                            return (success: true, error: nil)
+                        } catch {
+                            return (success: false, error: error)
+                        }
+                    }
+                }
+                
+                // Wait for at least one connection to complete
+                if activeConnections > 0 {
+                    let result = try await group.next()
+                    if let error = result?.error {
+                        failed += 1
+                        throw error
+                    } else if result?.success == true {
+                        successful += 1
+                    } else {
+                        failed += 1
+                    }
+                    activeConnections -= 1
+                }
+            }
+        }
+        
+        // Notify delegate of parallel connection completion
+        metricsDelegate?.parallelConnectionDidComplete(
+            totalAttempted: totalAttempted,
+            successful: successful,
+            failed: failed
+        )
+        
+        // Connections are managed individually through the connection cache
+    }
+    
+    /// Connects to a list of server locations with parallel processing and advanced configuration.
+    ///
+    /// This method provides parallel connection processing with advanced configuration options.
+    ///
+    /// - Parameters:
+    ///   - servers: An array of `ServerLocation` instances to connect to.
+    ///   - maxReconnectionAttempts: The maximum number of reconnection attempts for each server. Default is 6.
+    ///   - timeout: The timeout duration for each connection attempt. Default is 10 seconds.
+    ///   - tlsPreKeyed: Optional pre-configured TLS settings to use for all connections.
+    ///   - retryStrategy: The retry strategy to use for failed connections.
+    ///   - maxConcurrentConnections: Maximum number of concurrent connection attempts. Default is 4.
+    ///
+    /// - Throws: An error if all connection attempts fail after the maximum number of retries.
+    public func connectParallel(
+        to servers: [ServerLocation],
+        maxReconnectionAttempts: Int = 6,
+        timeout: TimeAmount = .seconds(10),
+        tlsPreKeyed: TLSPreKeyedConfiguration? = nil,
+        retryStrategy: RetryStrategy,
+        maxConcurrentConnections: Int = 4
+    ) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            var activeConnections = 0
+            var serverIndex = 0
+            
+            while serverIndex < servers.count || activeConnections > 0 {
+                // Start new connections up to the concurrency limit
+                while activeConnections < maxConcurrentConnections && serverIndex < servers.count {
+                    let server = servers[serverIndex]
+                    serverIndex += 1
+                    activeConnections += 1
+                    
+                    group.addTask { [weak self] in
+                        guard let self else { return }
+                        try await self.attemptConnection(
+                            to: server,
+                            currentAttempt: 0,
+                            maxAttempts: maxReconnectionAttempts,
+                            timeout: timeout,
+                            tlsPreKeyed: tlsPreKeyed,
+                            retryStrategy: retryStrategy)
+                    }
+                }
+                
+                // Wait for at least one connection to complete
+                if activeConnections > 0 {
+                    try await group.next()
+                    activeConnections -= 1
+                }
+            }
+        }
+        
+        // Connections are managed individually through the connection cache
     }
 }

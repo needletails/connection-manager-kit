@@ -202,6 +202,9 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
                         }
                     }
                 }
+                
+                // Ensure the outbound writer is finished to prevent memory leaks
+                outbound.finish()
             }
         }
     }
@@ -264,11 +267,17 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
     /// }
     /// ```
     func shutdown() async throws {
-        if let inboundContinuation, let continuation {
+        // Finish continuations if they exist
+        if let inboundContinuation {
             inboundContinuation.finish()
+        }
+        if let continuation {
             continuation.finish()
-        } else {
-            try await childChannel?.executeThenClose { inbound, outbound in
+        }
+        
+        // Only try to finish the outbound writer if we have a valid channel
+        if let childChannel {
+            try await childChannel.executeThenClose { inbound, outbound in
                 outbound.finish()
             }
         }

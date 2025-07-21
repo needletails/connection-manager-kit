@@ -16,7 +16,10 @@ A modern, cross-platform networking framework built on SwiftNIO for managing net
 
 ### 🔄 Automatic Connection Management
 - **Smart Reconnection** - Built-in retry logic with exponential backoff
-- **Connection Caching** - Efficient connection reuse and management
+- **Advanced Retry Strategies** - Fixed delay, exponential backoff with jitter, and custom retry policies
+- **Parallel Connections** - Concurrent connection establishment for improved performance
+- **Connection Pooling** - Efficient connection reuse with acquire/return semantics
+- **Connection Caching** - LRU eviction, TTL support, and automatic cleanup
 - **Graceful Shutdown** - Proper resource cleanup and termination
 - **Network Monitoring** - Real-time network event tracking
 
@@ -57,7 +60,7 @@ dependencies: [
 ```swift
 import ConnectionManagerKit
 
-let manager = ConnectionManager()
+let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
 manager.delegate = MyConnectionManagerDelegate()
 ```
 
@@ -73,7 +76,7 @@ class MyConnectionManagerDelegate: ConnectionManagerDelegate {
     }
     
     func deliverChannel(_ channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>, 
-                       manager: ConnectionManager, 
+                       manager: ConnectionManager<ByteBuffer, ByteBuffer>, 
                        cacheKey: String) async {
         await manager.setDelegates(
             connectionDelegate: connectionDelegate,
@@ -102,17 +105,77 @@ let servers = [
 ]
 ```
 
-### 4. Connect to Servers
+### 4. Connect to Servers with Advanced Retry Strategies
 
 ```swift
+// Basic connection
 try await manager.connect(
     to: servers,
     maxReconnectionAttempts: 5,
     timeout: .seconds(10)
 )
+
+// With exponential backoff retry strategy
+try await manager.connect(
+    to: servers,
+    maxReconnectionAttempts: 5,
+    timeout: .seconds(10),
+    retryStrategy: .exponential(
+        initialDelay: .seconds(1),
+        maxDelay: .seconds(30),
+        multiplier: 2.0,
+        jitter: true
+    )
+)
+
+// Parallel connections for improved performance
+try await manager.connectParallel(
+    to: servers,
+    maxConcurrentConnections: 5,
+    retryStrategy: .fixed(delay: .seconds(2))
+)
 ```
 
-### 5. Handle Data
+### 5. Use Connection Pooling
+
+```swift
+// Configure connection pool
+let poolConfig = ConnectionPoolConfiguration(
+    minConnections: 2,
+    maxConnections: 10,
+    acquireTimeout: .seconds(5),
+    maxIdleTime: .seconds(60)
+)
+
+// Acquire connection from pool
+let connection = try await manager.connectionCache.acquireConnection(
+    for: "api-server",
+    poolConfig: poolConfig
+) {
+    // Connection factory: create new connection if needed
+    return ChildChannelService<ByteBuffer, ByteBuffer>(
+        logger: .init(),
+        config: .init(
+            host: "api.example.com",
+            port: 443,
+            enableTLS: true,
+            cacheKey: "api-server",
+            delegate: connectionDelegate,
+            contextDelegate: contextDelegate
+        ),
+        childChannel: nil,
+        delegate: manager
+    )
+}
+
+// Return connection to pool
+await manager.connectionCache.returnConnection(
+    "api-server",
+    poolConfig: poolConfig
+)
+```
+
+### 6. Handle Data
 
 ```swift
 class MyChannelContextDelegate: ChannelContextDelegate {
@@ -138,7 +201,7 @@ class MyChannelContextDelegate: ChannelContextDelegate {
 }
 ```
 
-### 6. Graceful Shutdown
+### 7. Graceful Shutdown
 
 ```swift
 await manager.gracefulShutdown()
@@ -163,6 +226,25 @@ swift package generate-documentation
 ```
 
 ## 🔧 Configuration
+
+### Connection Pooling and Caching
+
+```swift
+// Configure connection cache with LRU eviction and TTL
+let cacheConfig = CacheConfiguration(
+    maxConnections: 50,
+    ttl: .seconds(300),  // 5 minutes TTL
+    enableLRU: true      // Enable LRU eviction
+)
+
+// Configure connection pool
+let poolConfig = ConnectionPoolConfiguration(
+    minConnections: 2,           // Maintain at least 2 connections
+    maxConnections: 20,          // Maximum 20 connections
+    acquireTimeout: .seconds(10), // 10 second timeout
+    maxIdleTime: .seconds(60)    // Close idle connections after 1 minute
+)
+```
 
 ### Multiple Server Connections
 
@@ -190,6 +272,38 @@ try await manager.connect(
     to: servers,
     maxReconnectionAttempts: 3,
     timeout: .seconds(15)
+)
+```
+
+### Advanced Retry Strategies
+
+```swift
+// Fixed delay retry
+try await manager.connect(
+    to: servers,
+    retryStrategy: .fixed(delay: .seconds(5))
+)
+
+// Exponential backoff with jitter
+try await manager.connect(
+    to: servers,
+    retryStrategy: .exponential(
+        initialDelay: .seconds(1),
+        multiplier: 2.0,
+        maxDelay: .seconds(30),
+        jitter: true
+    )
+)
+
+// Custom retry strategy
+try await manager.connect(
+    to: servers,
+    retryStrategy: .custom { attempt, maxAttempts in
+        if attempt >= 3 {
+            return .seconds(0) // Stop retrying after 3 attempts
+        }
+        return .seconds(Int64(pow(2.0, Double(attempt))))
+    }
 )
 ```
 
@@ -243,7 +357,7 @@ ConnectionManagerKit/
 
 - **ConnectionManager** - Client-side connection management
 - **ConnectionListener** - Server-side connection acceptance
-- **ConnectionCache** - Efficient connection storage
+- **ConnectionCache** - Efficient connection storage with LRU and TTL
 - **NetworkEventMonitor** - Network event tracking
 - **ChannelService** - Channel lifecycle management
 
@@ -285,7 +399,7 @@ class MyConnectionDelegate: ConnectionDelegate {
 
 ```swift
 class MyApp {
-    let manager = ConnectionManager()
+    let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
     
     func shutdown() async {
         // Trigger graceful shutdown
@@ -311,12 +425,15 @@ swift test
 
 The framework includes comprehensive unit tests covering:
 
-- Connection management
+- Connection management with real networking
 - Server listening
 - TLS configuration
 - Network event handling
 - Error scenarios
 - Graceful shutdown
+- Connection pooling
+- Retry strategies
+- Parallel connections
 
 ## 📄 License
 
@@ -331,10 +448,12 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ConnectionManagerKit is designed for production use with:
 
-- **Production-Ready** - Battle-tested networking framework
+- **Production-Ready** - Battle-tested networking framework with real networking tests
 - **High Performance** - Optimized for high-throughput applications
 - **Reliability** - Robust error handling and recovery
 - **Scalability** - Designed for large-scale deployments
+- **Connection Pooling** - Efficient resource management
+- **Advanced Retry Logic** - Configurable retry strategies for different scenarios
 
 ## 🔗 Related Projects
 

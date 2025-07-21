@@ -24,6 +24,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-transport-services.git", from: "1.19.0"),
         .package(url: "https://github.com/apple/swift-nio-extras.git", from: "1.13.0"),
         .package(url: "https://github.com/needletails/needletail-logger.git", .upToNextMajor(from: "3.0.0")),
+        .package(url: "https://github.com/apple/swift-metrics.git", from: "2.4.1"),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -38,6 +39,7 @@ let package = Package(
                 .product(name: "NIOExtras", package: "swift-nio-extras"),
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
                 .product(name: "NeedleTailLogger", package: "needletail-logger"),
+                .product(name: "Metrics", package: "swift-metrics"),
             ]),
         .testTarget(
             name: "ConnectionManagerKitTests",

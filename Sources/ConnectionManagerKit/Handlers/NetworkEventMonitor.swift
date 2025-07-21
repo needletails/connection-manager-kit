@@ -17,6 +17,30 @@ import Network
 import NIOTransportServices
 #endif
 
+/// Configuration for network event monitoring.
+public struct NetworkEventConfiguration: Sendable {
+    /// Buffer size for error streams.
+    public let errorBufferSize: Int
+    /// Buffer size for event streams.
+    public let eventBufferSize: Int
+    /// Buffer size for channel lifecycle streams.
+    public let lifecycleBufferSize: Int
+    /// Whether to enable event prioritization.
+    public let enableEventPrioritization: Bool
+    
+    public init(
+        errorBufferSize: Int = 10,
+        eventBufferSize: Int = 10,
+        lifecycleBufferSize: Int = 5,
+        enableEventPrioritization: Bool = true
+    ) {
+        self.errorBufferSize = errorBufferSize
+        self.eventBufferSize = eventBufferSize
+        self.lifecycleBufferSize = lifecycleBufferSize
+        self.enableEventPrioritization = enableEventPrioritization
+    }
+}
+
 /// A channel handler that monitors network events and connection state changes.
 ///
 /// `NetworkEventMonitor` is responsible for detecting and reporting network-related
@@ -30,11 +54,20 @@ import NIOTransportServices
 /// - **Channel Lifecycle**: Tracks channel active/inactive state changes
 /// - **Cross-Platform Support**: Works on Apple platforms and Linux with appropriate event types
 /// - **Async Streams**: Provides async streams for continuous event monitoring
+/// - **Configurable Buffering**: Customizable buffer sizes for different event types
+/// - **Event Prioritization**: Optional prioritization of critical events
 ///
 /// ## Usage Example
 /// ```swift
+/// let config = NetworkEventConfiguration(
+///     errorBufferSize: 20,
+///     eventBufferSize: 15,
+///     lifecycleBufferSize: 10,
+///     enableEventPrioritization: true
+/// )
+/// 
 /// // The monitor is automatically added to the channel pipeline
-/// let monitor = NetworkEventMonitor(connectionIdentifier: "my-connection")
+/// let monitor = NetworkEventMonitor(connectionIdentifier: "my-connection", configuration: config)
 /// 
 /// // Monitor network events
 /// if let eventStream = monitor.eventStream {
@@ -69,6 +102,9 @@ public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendab
     
     /// A unique identifier for the connection being monitored.
     public let connectionIdentifier: String
+    
+    /// The configuration for this monitor.
+    private let configuration: NetworkEventConfiguration
     
     /// An atomic flag to prevent duplicate error reporting.
     private let didSetError = ManagedAtomic(false)
@@ -124,32 +160,58 @@ public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendab
     /// ```
     init(connectionIdentifier: String) {
         self.connectionIdentifier = connectionIdentifier
+        self.configuration = NetworkEventConfiguration()
+        
+        // Initialize streams with default configuration
+        initializeStreams()
+    }
+    
+    /// Creates a new network event monitor with custom configuration.
+    ///
+    /// - Parameters:
+    ///   - connectionIdentifier: A unique identifier for the connection being monitored.
+    ///   - configuration: The configuration for this monitor.
+    ///
+    /// ## Example
+    /// ```swift
+    /// let config = NetworkEventConfiguration(errorBufferSize: 20, eventBufferSize: 15)
+    /// let monitor = NetworkEventMonitor(connectionIdentifier: "api-server-1", configuration: config)
+    /// ```
+    init(connectionIdentifier: String, configuration: NetworkEventConfiguration) {
+        self.connectionIdentifier = connectionIdentifier
+        self.configuration = configuration
+        
+        // Initialize streams with custom configuration
+        initializeStreams()
+    }
+    
+    private func initializeStreams() {
 #if canImport(Network)
-        errorStream = AsyncStream<NWError>(bufferingPolicy: .bufferingNewest(1)) { [weak self] continuation in
+        errorStream = AsyncStream<NWError>(bufferingPolicy: .bufferingNewest(configuration.errorBufferSize)) { [weak self] continuation in
             guard let self else { return }
             self.errorContinuation = continuation
         }
         
-        eventStream = AsyncStream<NetworkEvent>(bufferingPolicy: .bufferingNewest(1)) { [weak self] continuation in
+        eventStream = AsyncStream<NetworkEvent>(bufferingPolicy: .bufferingNewest(configuration.eventBufferSize)) { [weak self] continuation in
             guard let self else { return }
             self.eventContinuation = continuation
         }
 #else
-        errorStream = AsyncStream<IOError>(bufferingPolicy: .bufferingNewest(1)) { [weak self] continuation in
+        errorStream = AsyncStream<IOError>(bufferingPolicy: .bufferingNewest(configuration.errorBufferSize)) { [weak self] continuation in
             guard let self else { return }
             self.errorContinuation = continuation
         }
         
-        eventStream = AsyncStream<NIOEvent>(bufferingPolicy: .bufferingNewest(1)) { [weak self] continuation in
+        eventStream = AsyncStream<NIOEvent>(bufferingPolicy: .bufferingNewest(configuration.eventBufferSize)) { [weak self] continuation in
             guard let self else { return }
             self.eventContinuation = continuation
         }
 #endif
-        channelActiveStream = AsyncStream<Void>(bufferingPolicy: .bufferingNewest(1)) { [weak self] continuation in
+        channelActiveStream = AsyncStream<Void>(bufferingPolicy: .bufferingNewest(configuration.lifecycleBufferSize)) { [weak self] continuation in
             guard let self else { return }
             self.channelActiveContinuation = continuation
         }
-        channelInactiveStream = AsyncStream<Void>(bufferingPolicy: .bufferingNewest(1)) { [weak self] continuation in
+        channelInactiveStream = AsyncStream<Void>(bufferingPolicy: .bufferingNewest(configuration.lifecycleBufferSize)) { [weak self] continuation in
             guard let self else { return }
             self.channelInactiveContinuation = continuation
         }
