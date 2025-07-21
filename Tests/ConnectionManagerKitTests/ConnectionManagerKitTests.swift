@@ -222,7 +222,7 @@ final class ListenerDelegation: ListenerDelegate {
         #else
         let tlsConfig = TLSConfiguration.makeClientConfiguration()
         let preKeyedConfig = TLSPreKeyedConfiguration(tlsConfiguration: tlsConfig)
-        #expect(preKeyedConfig.tlsConfiguration !== nil)
+        #expect(preKeyedConfig.tlsConfiguration.minimumTLSVersion == .tlsv1)
         #endif
     }
     
