@@ -63,7 +63,7 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
     private var connectionDelegate: ConnectionDelegate?
     
     /// The delegate responsible for handling channel context events.
-    private var contextDelegate: ChannelContextDelegate?
+    public private(set) var contextDelegate: ChannelContextDelegate?
     
     /// The continuation for the outbound writer stream.
     var continuation: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation?

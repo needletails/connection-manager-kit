@@ -94,15 +94,21 @@ class MyConnectionManagerDelegate: ConnectionManagerDelegate {
         ]
     }
     
-    func deliverChannel(_ channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>, 
-                       manager: ConnectionManager<ByteBuffer, ByteBuffer>, 
-                       cacheKey: String) async {
-        await manager.setDelegates(
-            connectionDelegate: connectionDelegate,
-            contextDelegate: contextDelegate,
-            cacheKey: cacheKey
-        )
+    func channelCreated(_ eventLoop: EventLoop, cacheKey: String) async {
+        // Called when a channel is created for the given cache key
+        // This is the preferred method for handling channel creation events
+        print("Channel created for cache key: \(cacheKey) on event loop: \(eventLoop)")
+        
+        // Set up connection-specific delegates if needed
+        // await manager.setDelegates(
+        //     connectionDelegate: connectionDelegate,
+        //     contextDelegate: contextDelegate,
+        //     cacheKey: cacheKey
+        // )
     }
+    
+    // Note: deliverChannel is deprecated and will be removed in a future version
+    // Use channelCreated instead for new implementations
 }
 ```
 

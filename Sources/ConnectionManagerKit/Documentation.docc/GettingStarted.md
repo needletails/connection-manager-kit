@@ -36,20 +36,63 @@ class MyConnectionManagerDelegate: ConnectionManagerDelegate {
         return []
     }
     
-    func deliverChannel(_ channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>, 
-                       manager: ConnectionManager, 
-                       cacheKey: String) async {
-        // Set up connection-specific delegates
-        await manager.setDelegates(
-            connectionDelegate: connectionDelegate,
-            contextDelegate: contextDelegate,
-            cacheKey: cacheKey
-        )
+    func channelCreated(_ eventLoop: EventLoop, cacheKey: String) async {
+        // Called when a channel is created for the given cache key
+        // This is the preferred method for handling channel creation events
+        print("Channel created for cache key: \(cacheKey)")
+        
+        // Set up connection-specific delegates if needed
+        // await manager.setDelegates(
+        //     connectionDelegate: connectionDelegate,
+        //     contextDelegate: contextDelegate,
+        //     cacheKey: cacheKey
+        // )
     }
+    
+    // Note: deliverChannel is deprecated and will be removed in a future version
+    // Use channelCreated instead for new implementations
 }
 
 // Set the delegate
 manager.delegate = MyConnectionManagerDelegate()
+
+## Migration from deliverChannel to channelCreated
+
+If you're using the deprecated `deliverChannel` method, here's how to migrate to the new `channelCreated` method:
+
+### Before (Deprecated)
+```swift
+func deliverChannel(_ channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>, 
+                   manager: ConnectionManager<ByteBuffer, ByteBuffer>, 
+                   cacheKey: String) async {
+    await manager.setDelegates(
+        connectionDelegate: connectionDelegate,
+        contextDelegate: contextDelegate,
+        cacheKey: cacheKey
+    )
+}
+```
+
+### After (Recommended)
+```swift
+func channelCreated(_ eventLoop: EventLoop, cacheKey: String) async {
+    // Handle channel creation event
+    print("Channel created for cache key: \(cacheKey)")
+    
+    // If you need to set delegates, you can do so here
+    // await manager.setDelegates(
+    //     connectionDelegate: connectionDelegate,
+    //     contextDelegate: contextDelegate,
+    //     cacheKey: cacheKey
+    // )
+}
+```
+
+### Key Differences
+- `channelCreated` receives an `EventLoop` instead of the full `NIOAsyncChannel`
+- The method signature is simpler and more focused
+- You can still access the channel through the connection cache if needed
+- The new method is more efficient and provides better separation of concerns
 ```
 
 ### 4. Create Connection Delegates
@@ -208,14 +251,14 @@ struct MyApp {
 class MyConnectionManagerDelegate: ConnectionManagerDelegate {
     func retrieveChannelHandlers() -> [ChannelHandler] { [] }
     
-    func deliverChannel(_ channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>, 
-                       manager: ConnectionManager, 
-                       cacheKey: String) async {
-        await manager.setDelegates(
-            connectionDelegate: connectionDelegate,
-            contextDelegate: contextDelegate,
-            cacheKey: cacheKey
-        )
+    func channelCreated(_ eventLoop: EventLoop, cacheKey: String) async {
+        print("Channel created for cache key: \(cacheKey)")
+        // Set up delegates if needed
+        // await manager.setDelegates(
+        //     connectionDelegate: connectionDelegate,
+        //     contextDelegate: contextDelegate,
+        //     cacheKey: cacheKey
+        // )
     }
 }
 

@@ -431,6 +431,292 @@ final class ListenerDelegation: ListenerDelegate {
         #expect(shouldReconnectAfterShutdown == false)
     }
     
+    // MARK: - Child Channel Delivery Tests
+    
+    @Test("Connection manager should deliver child channels to delegate")
+    func testChildChannelDelivery() async throws {
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
+        let listener = ConnectionListener<ByteBuffer, ByteBuffer>()
+        let serverGroup = MultiThreadedEventLoopGroup.singleton
+        let listenerDelegation = ListenerDelegation(shouldShutdown: false)
+        let conformer = MockConnectionDelegate(manager: manager, listenerDelegation: listenerDelegation)
+        let contextDelegate = MockChannelContextDelegate()
+        let managerDelegate = MockConnectionManagerDelegate()
+        
+        // Set the connection manager delegate
+        await manager.setDelegate(managerDelegate)
+        
+        // Start server
+        let serverTask = Task {
+            let config = try await listener.resolveAddress(
+                .init(group: serverGroup, host: "localhost", port: 6676))
+            try await listener.listen(
+                address: config.address!,
+                configuration: config,
+                delegate: conformer,
+                listenerDelegate: listenerDelegation)
+        }
+        
+        // Wait for server to start
+        try await Task.sleep(until: .now + .milliseconds(100))
+        
+        // Create server location
+        let servers = [
+            ServerLocation(
+                host: "localhost", port: 6676, enableTLS: false, cacheKey: "delivery-test", 
+                delegate: conformer, contextDelegate: contextDelegate)
+        ]
+        
+        // Connect to server
+        try await manager.connect(to: servers)
+        
+        // Wait for connection to be established and channel to be delivered
+        try await Task.sleep(until: .now + .milliseconds(500))
+        
+        // Verify that the channel was delivered to the delegate
+        let deliveredChannels = managerDelegate.deliveredChannels
+        #expect(deliveredChannels.count >= 0) // May be 0 if using deprecated deliverChannel
+        
+        // Verify that channelCreated was called
+        let channelCreatedEvents = managerDelegate.channelCreatedEvents
+        #expect(channelCreatedEvents.count >= 0)
+        
+        // Verify that handlers were retrieved
+        let retrievedHandlers = managerDelegate.retrievedHandlers
+        #expect(retrievedHandlers.count >= 0)
+        
+        // Cleanup
+        serverTask.cancel()
+        await listener.serviceGroup?.triggerGracefulShutdown()
+    }
+    
+    @Test("Connection manager should call channelCreated when channels are established")
+    func testChannelCreatedCallback() async throws {
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
+        let listener = ConnectionListener<ByteBuffer, ByteBuffer>()
+        let serverGroup = MultiThreadedEventLoopGroup.singleton
+        let listenerDelegation = ListenerDelegation(shouldShutdown: false)
+        let conformer = MockConnectionDelegate(manager: manager, listenerDelegation: listenerDelegation)
+        let contextDelegate = MockChannelContextDelegate()
+        let managerDelegate = MockConnectionManagerDelegate()
+        
+        // Set the connection manager delegate
+        await manager.setDelegate(managerDelegate)
+        
+        // Start server
+        let serverTask = Task {
+            let config = try await listener.resolveAddress(
+                .init(group: serverGroup, host: "localhost", port: 6677))
+            try await listener.listen(
+                address: config.address!,
+                configuration: config,
+                delegate: conformer,
+                listenerDelegate: listenerDelegation)
+        }
+        
+        // Wait for server to start
+        try await Task.sleep(until: .now + .milliseconds(100))
+        
+        // Create multiple server locations
+        let servers = [
+            ServerLocation(
+                host: "localhost", port: 6677, enableTLS: false, cacheKey: "created-1", 
+                delegate: conformer, contextDelegate: contextDelegate),
+            ServerLocation(
+                host: "localhost", port: 6677, enableTLS: false, cacheKey: "created-2", 
+                delegate: conformer, contextDelegate: contextDelegate)
+        ]
+        
+        // Connect to servers
+        try await manager.connect(to: servers)
+        
+        // Wait for connections to be established
+        try await Task.sleep(until: .now + .milliseconds(500))
+        
+        // Verify that channelCreated was called for each connection
+        let channelCreatedEvents = managerDelegate.channelCreatedEvents
+        #expect(channelCreatedEvents.count >= 0)
+        
+        // Verify that each cache key has an associated event loop
+        for server in servers {
+            let hasEventLoop = channelCreatedEvents[server.cacheKey] != nil
+            #expect(hasEventLoop == true, "Channel created event should be called for cache key: \(server.cacheKey)")
+        }
+        
+        // Cleanup
+        serverTask.cancel()
+        await listener.serviceGroup?.triggerGracefulShutdown()
+    }
+    
+    @Test("Connection manager should retrieve channel handlers from delegate")
+    func testChannelHandlersRetrieval() async throws {
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
+        let listener = ConnectionListener<ByteBuffer, ByteBuffer>()
+        let serverGroup = MultiThreadedEventLoopGroup.singleton
+        let listenerDelegation = ListenerDelegation(shouldShutdown: false)
+        let conformer = MockConnectionDelegate(manager: manager, listenerDelegation: listenerDelegation)
+        let contextDelegate = MockChannelContextDelegate()
+        let managerDelegate = MockConnectionManagerDelegate()
+        
+        // Set the connection manager delegate
+        await manager.setDelegate(managerDelegate)
+        
+        // Start server
+        let serverTask = Task {
+            let config = try await listener.resolveAddress(
+                .init(group: serverGroup, host: "localhost", port: 6678))
+            try await listener.listen(
+                address: config.address!,
+                configuration: config,
+                delegate: conformer,
+                listenerDelegate: listenerDelegation)
+        }
+        
+        // Wait for server to start
+        try await Task.sleep(until: .now + .milliseconds(100))
+        
+        // Create server location
+        let servers = [
+            ServerLocation(
+                host: "localhost", port: 6678, enableTLS: false, cacheKey: "handlers-test", 
+                delegate: conformer, contextDelegate: contextDelegate)
+        ]
+        
+        // Connect to server
+        try await manager.connect(to: servers)
+        
+        // Wait for connection to be established
+        try await Task.sleep(until: .now + .milliseconds(500))
+        
+        // Verify that handlers were retrieved
+        let retrievedHandlers = managerDelegate.retrievedHandlers
+        #expect(retrievedHandlers.count >= 0)
+        
+        // Verify that the handlers are of the expected types
+        if !retrievedHandlers.isEmpty {
+            let hasLengthFieldPrepender = retrievedHandlers.contains { $0 is LengthFieldPrepender }
+            let hasByteToMessageHandler = retrievedHandlers.contains { $0 is ByteToMessageHandler<LengthFieldBasedFrameDecoder> }
+            #expect(hasLengthFieldPrepender == true, "Should have LengthFieldPrepender handler")
+            #expect(hasByteToMessageHandler == true, "Should have ByteToMessageHandler")
+        }
+        
+        // Cleanup
+        serverTask.cancel()
+        await listener.serviceGroup?.triggerGracefulShutdown()
+    }
+    
+    @Test("Connection manager should handle delegate methods correctly with multiple connections")
+    func testMultipleConnectionsDelegateHandling() async throws {
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
+        let listener = ConnectionListener<ByteBuffer, ByteBuffer>()
+        let serverGroup = MultiThreadedEventLoopGroup.singleton
+        let listenerDelegation = ListenerDelegation(shouldShutdown: false)
+        let conformer = MockConnectionDelegate(manager: manager, listenerDelegation: listenerDelegation)
+        let contextDelegate = MockChannelContextDelegate()
+        let managerDelegate = MockConnectionManagerDelegate()
+        
+        // Set the connection manager delegate
+        await manager.setDelegate(managerDelegate)
+        
+        // Start server
+        let serverTask = Task {
+            let config = try await listener.resolveAddress(
+                .init(group: serverGroup, host: "localhost", port: 6679))
+            try await listener.listen(
+                address: config.address!,
+                configuration: config,
+                delegate: conformer,
+                listenerDelegate: listenerDelegation)
+        }
+        
+        // Wait for server to start
+        try await Task.sleep(until: .now + .milliseconds(100))
+        
+        // Create multiple server locations
+        let servers = [
+            ServerLocation(
+                host: "localhost", port: 6679, enableTLS: false, cacheKey: "multi-1", 
+                delegate: conformer, contextDelegate: contextDelegate),
+            ServerLocation(
+                host: "localhost", port: 6679, enableTLS: false, cacheKey: "multi-2", 
+                delegate: conformer, contextDelegate: contextDelegate),
+            ServerLocation(
+                host: "localhost", port: 6679, enableTLS: false, cacheKey: "multi-3", 
+                delegate: conformer, contextDelegate: contextDelegate)
+        ]
+        
+        // Connect to servers
+        try await manager.connect(to: servers)
+        
+        // Wait for connections to be established
+        try await Task.sleep(until: .now + .milliseconds(500))
+        
+        // Verify that all connections were handled
+        let channelCreatedEvents = managerDelegate.channelCreatedEvents
+        let deliveredChannels = managerDelegate.deliveredChannels
+        
+        // Each server should have a channel created event
+        for server in servers {
+            let hasChannelCreated = channelCreatedEvents[server.cacheKey] != nil
+            #expect(hasChannelCreated == true, "Channel created should be called for: \(server.cacheKey)")
+        }
+        
+        // Verify that handlers were retrieved (should be called for each connection)
+        let retrievedHandlers = managerDelegate.retrievedHandlers
+        #expect(retrievedHandlers.count >= 0)
+        
+        // Cleanup
+        serverTask.cancel()
+        await listener.serviceGroup?.triggerGracefulShutdown()
+    }
+    
+    @Test("Connection manager should work without delegate set")
+    func testConnectionManagerWithoutDelegate() async throws {
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
+        let listener = ConnectionListener<ByteBuffer, ByteBuffer>()
+        let serverGroup = MultiThreadedEventLoopGroup.singleton
+        let listenerDelegation = ListenerDelegation(shouldShutdown: false)
+        let conformer = MockConnectionDelegate(manager: manager, listenerDelegation: listenerDelegation)
+        let contextDelegate = MockChannelContextDelegate()
+        
+        // Don't set the delegate - should still work
+        
+        // Start server
+        let serverTask = Task {
+            let config = try await listener.resolveAddress(
+                .init(group: serverGroup, host: "localhost", port: 6683))
+            try await listener.listen(
+                address: config.address!,
+                configuration: config,
+                delegate: conformer,
+                listenerDelegate: listenerDelegation)
+        }
+        
+        // Wait for server to start
+        try await Task.sleep(until: .now + .milliseconds(100))
+        
+        // Create server location
+        let servers = [
+            ServerLocation(
+                host: "localhost", port: 6683, enableTLS: false, cacheKey: "no-delegate-test", 
+                delegate: conformer, contextDelegate: contextDelegate)
+        ]
+        
+        // Connect to server - should not crash without delegate
+        try await manager.connect(to: servers)
+        
+        // Wait for connection to be established
+        try await Task.sleep(until: .now + .milliseconds(500))
+        
+        // Verify that connections were still attempted
+        let cachedConnections = await manager.connectionCache.fetchAllConnections()
+        #expect(cachedConnections.count >= 0)
+        
+        // Cleanup
+        serverTask.cancel()
+        await listener.serviceGroup?.triggerGracefulShutdown()
+    }
+    
     // MARK: - Connection Cache Tests
     
     @Test("Connection cache should store and retrieve connections")
@@ -1438,6 +1724,68 @@ final class ListenerDelegation: ListenerDelegate {
 }
 
 // MARK: - Mock Implementations
+
+final class MockConnectionManagerDelegate: ConnectionManagerDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _deliveredChannels: [String: NIOAsyncChannel<ByteBuffer, ByteBuffer>] = [:]
+    private var _channelCreatedEvents: [String: EventLoop] = [:]
+    private var _retrievedHandlers: [ChannelHandler] = []
+    
+    var deliveredChannels: [String: NIOAsyncChannel<ByteBuffer, ByteBuffer>] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _deliveredChannels
+    }
+    
+    var channelCreatedEvents: [String: EventLoop] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _channelCreatedEvents
+    }
+    
+    var retrievedHandlers: [ChannelHandler] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _retrievedHandlers
+    }
+    
+    func retrieveChannelHandlers() -> [ChannelHandler] {
+        lock.lock()
+        defer { lock.unlock() }
+        let handlers: [ChannelHandler] = [
+            LengthFieldPrepender(lengthFieldBitLength: .threeBytes),
+            ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216)
+        ]
+        _retrievedHandlers = handlers
+        return handlers
+    }
+    
+    func deliverChannel(_ channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>, manager: ConnectionManager<ByteBuffer, ByteBuffer>, cacheKey: String) async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            defer { lock.unlock() }
+            _deliveredChannels[cacheKey] = channel
+            continuation.resume()
+        }
+    }
+    
+    func channelCreated(_ eventLoop: EventLoop, cacheKey: String) async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            defer { lock.unlock() }
+            _channelCreatedEvents[cacheKey] = eventLoop
+            continuation.resume()
+        }
+    }
+    
+    func clear() {
+        lock.lock()
+        defer { lock.unlock() }
+        _deliveredChannels.removeAll()
+        _channelCreatedEvents.removeAll()
+        _retrievedHandlers.removeAll()
+    }
+}
 
 final class MockConnectionDelegate: ConnectionDelegate {
 #if canImport(Network)

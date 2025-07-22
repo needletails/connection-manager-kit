@@ -139,7 +139,21 @@ public protocol ConnectionManagerDelegate: AnyObject, Sendable {
     ///   - cacheKey: A unique identifier for the connection in the cache.
     ///
     /// - Note: This method is asynchronous and should be awaited.
+    @available(*, deprecated, message: "This method is deprecated and will be removed in a future version. Use channelCreated(_:cacheKey:) instead.")
     func deliverChannel(_ channel: NIOAsyncChannel<Inbound, Outbound>, manager: ConnectionManager<Inbound, Outbound>, cacheKey: String) async
+
+    /// Called when a channel is created.
+    ///
+    /// This method is called when a channel is created. It is used to notify the delegate that a channel has been created.
+    ///
+    /// - Parameters:
+    ///   - eventLoop: The event loop that the channel is created on.
+    ///   - cacheKey: A unique identifier for the connection in the cache.
+    func channelCreated(_ eventLoop: EventLoop, cacheKey: String) async
+}
+
+extension ConnectionManagerDelegate {
+    func deliverChannel(_ channel: NIOAsyncChannel<Inbound, Outbound>, manager: ConnectionManager<Inbound, Outbound>, cacheKey: String) async {}
 }
 
 /// Configuration for connection retry strategies.
@@ -575,7 +589,9 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                     config: server,
                     childChannel: childChannel,
                     delegate: self), for: server.cacheKey)
-            
+
+            await delegate?.channelCreated(childChannel.channel.eventLoop, cacheKey: server.cacheKey)
+
             let monitor = try await childChannel.channel.pipeline.handler(type: NetworkEventMonitor.self).get()
             if let foundConnection = await connectionCache.findConnection(cacheKey: server.cacheKey) {
                 await delegateMonitorEvents(monitor: monitor, server: foundConnection.config)
