@@ -1,3 +1,5 @@
+<img src="connection_manager_kit.svg" alt="ConnectionManagerKit" width="200" />
+
 # ConnectionManagerKit
 
 [![Swift](https://img.shields.io/badge/Swift-6.0-orange.svg)](https://swift.org)
