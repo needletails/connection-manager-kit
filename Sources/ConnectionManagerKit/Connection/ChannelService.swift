@@ -159,7 +159,7 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
     /// This private method handles the core logic of setting up streams, processing
     /// inbound and outbound data, and coordinating with delegates.
     nonisolated private func exectuteTask() async throws {
-        guard let childChannel = childChannel else { return }
+        guard let childChannel else { return }
         try await withThrowingDiscardingTaskGroup { group in
             try await childChannel.executeThenClose { [weak self] inbound, outbound in
                 guard let self else { return }
