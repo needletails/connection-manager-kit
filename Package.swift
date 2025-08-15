@@ -34,6 +34,8 @@ let package = Package(
             dependencies: [
                 .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOWebSocket", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOTransportServices", package: "swift-nio-transport-services"),
                 .product(name: "NIOExtras", package: "swift-nio-extras"),
@@ -43,7 +45,12 @@ let package = Package(
             ]),
         .testTarget(
             name: "ConnectionManagerKitTests",
-            dependencies: ["ConnectionManagerKit"]
+            dependencies: [
+                "ConnectionManagerKit",
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOWebSocket", package: "swift-nio"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl")
+            ]
         ),
     ]
 )

@@ -239,13 +239,14 @@ public protocol ChannelContextDelegate: AnyObject, Sendable {
 ///     }
 /// }
 /// ```
-public protocol ListenerDelegate: AnyObject, Sendable {
+public protocol ListenerDelegate: AnyObject, Sendable, TCPListenerDelegate, WebSocketListenerDelegate {
     /// Called when the server has successfully bound to its address and is listening for connections.
     ///
     /// This method is called when the server has been successfully set up and is
     /// ready to accept incoming connections.
     ///
     /// - Parameter channel: The server channel that is now listening for connections.
+    @available(*, deprecated, renamed: "didBindTCPServer")
     func didBindServer<Inbound: Sendable, Outbound: Sendable>(channel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>) async
     
     /// Retrieves an SSL handler for secure connections.
@@ -263,6 +264,34 @@ public protocol ListenerDelegate: AnyObject, Sendable {
     ///
     /// - Returns: An array of channel handlers to add to the server pipeline.
     nonisolated func retrieveChannelHandlers() -> [ChannelHandler]
+}
+
+// TCP-specific delegate
+public protocol TCPListenerDelegate {
+    func didBindTCPServer<Inbound: Sendable, Outbound: Sendable>(
+        channel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>
+    ) async
+}
+
+// WebSocket-specific delegate
+public protocol WebSocketListenerDelegate {
+    func didBindWebSocketServer<Inbound: Sendable, Outbound: Sendable>(
+        channel: NIOAsyncChannel<EventLoopFuture<NIOAsyncChannel<Inbound, Outbound>>, Never>
+    ) async
+}
+
+extension TCPListenerDelegate{
+    func didBindTCPServer<Inbound: Sendable, Outbound: Sendable>(
+        channel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>
+    ) async {}
+}
+extension WebSocketListenerDelegate{
+    func didBindWebSocketServer<Inbound: Sendable, Outbound: Sendable>(
+        channel: NIOAsyncChannel<EventLoopFuture<NIOAsyncChannel<Inbound, Outbound>>, Never>
+    ) async {}
+}
+extension ListenerDelegate {
+    func didBindServer<Inbound: Sendable, Outbound: Sendable>(channel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>) async {}
 }
 
 /// A protocol for handling service listener events and configuration.

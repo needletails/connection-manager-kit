@@ -5,6 +5,8 @@ import NIOCore
 import NIOExtras
 import NIOPosix
 import NIOSSL
+import NIOHTTP1
+import NIOWebSocket
 import ServiceLifecycle
 import NeedleTailLogger
 import Metrics
@@ -125,7 +127,7 @@ public protocol ConnectionManagerDelegate: AnyObject, Sendable {
     ///
     /// - Returns: An array of `ChannelHandler` instances to be added to the connection pipeline.
     func retrieveChannelHandlers() -> [ChannelHandler]
-
+    
     /// Delivers the `NIOAsyncChannel` to the delegate for further configuration.
     ///
     /// This method provides access to the underlying `NIOChannel`, allowing the delegate to set up
@@ -221,6 +223,9 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     private var serviceGroup: ServiceGroup?
     /// Background task that runs the service lifecycle without blocking connect calls.
     private var serviceLifecycleTask: Task<Void, Never>?
+    /// Optional WebSocket configuration applied to all connections created by this manager.
+    public nonisolated(unsafe) var webSocketOptions: WebSocketOptions?
+    private nonisolated(unsafe) var enabledWebsocket: Bool = false
     
     /// The logger instance for this connection manager.
     private let logger: NeedleTailLogger
@@ -701,7 +706,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     /// Errors that can occur within the `ConnectionManager`.
     enum Errors: Error {
         /// Indicates that TLS configuration is required but not provided.
-        case tlsNotConfigured
+        case tlsNotConfigured, websocketUpgradeFailed
     }
     
     /// Creates a connection to the specified server.
@@ -786,14 +791,92 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
             .connectTimeout(timeout)
             .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
         
-        return try await connection.connect(
-            host: server.host,
-            port: server.port) { channel in
-                return createHandlers(channel, server: server)
+        if enabledWebsocket {
+            let upgradeResult: EventLoopFuture<UpgradeResult> = try await connection.connect(
+                host: server.host,
+                port: server.port) { channel in
+                   upgradeSocket(channel, server: server)
+                }
+            switch try await upgradeResult.get() {
+            case .websocket(let websocketChannel):
+                    return websocketChannel as! NIOAsyncChannel<Inbound, Outbound>
+            case .notUpgraded:
+                throw Errors.websocketUpgradeFailed
             }
+        } else {
+            return try await connection.connect(
+                host: server.host,
+                port: server.port) { channel in
+                    return createHandlers(channel, server: server)
+                }
+        }
 #else
         return try await socketChannelCreator()
 #endif
+        
+        @Sendable func upgradeSocket(_ channel: Channel, server: ServerLocation
+        ) -> EventLoopFuture<EventLoopFuture<ConnectionManager<Inbound, Outbound>.UpgradeResult>> {
+            let monitor = NetworkEventMonitor(connectionIdentifier: server.cacheKey)
+            return channel.eventLoop.makeCompletedFuture {
+                try channel.pipeline.syncOperations.addHandler(monitor)
+                if webSocketOptions == nil {
+                    webSocketOptions = WebSocketOptions()
+                }
+                guard let webSocketOptions else {
+                    throw Errors.websocketUpgradeFailed
+                }
+                
+
+                let upgrader = NIOTypedWebSocketClientUpgrader<UpgradeResult>(
+                    maxFrameSize: webSocketOptions.maxFrameSize,
+                    enableAutomaticErrorHandling: true,
+                    upgradePipelineHandler: { (channel, _) in
+                        channel.eventLoop.makeCompletedFuture {
+                            try channel.pipeline.syncOperations.addHandler(NIOWebSocketFrameAggregator(
+                                minNonFinalFragmentSize: webSocketOptions.minNonFinalFragmentSize,
+                                maxAccumulatedFrameCount: webSocketOptions.maxAccumulatedFrameCount,
+                                maxAccumulatedFrameSize: webSocketOptions.maxAccumulatedFrameSize
+                            ))
+                            let asyncChannel = try NIOAsyncChannel<WebSocketFrame, WebSocketFrame>(wrappingChannelSynchronously: channel)
+                            return .websocket(asyncChannel)
+                        }
+                    }
+                )
+                
+                var headers = HTTPHeaders()
+                let needsPort = !(server.port == 80 || server.port == 443)
+                headers.add(name: "Host", value: needsPort ? "\(server.host):\(server.port)" : server.host)
+
+                for (name, value) in webSocketOptions.headers {
+                    headers.add(name: name, value: value)
+                }
+                if let subs = webSocketOptions.subprotocols, !subs.isEmpty {
+                    headers.add(name: "Sec-WebSocket-Protocol", value: subs.joined(separator: ", "))
+                }
+                
+                let requestHead = HTTPRequestHead(
+                    version: .http1_1,
+                    method: .GET,
+                    uri: webSocketOptions.uri,
+                    headers: headers
+                )
+
+                let clientUpgradeConfiguration = NIOTypedHTTPClientUpgradeConfiguration(
+                    upgradeRequestHead: requestHead,
+                    upgraders: [upgrader],
+                    notUpgradingCompletionHandler: { channel in
+                        channel.eventLoop.makeCompletedFuture {
+                            UpgradeResult.notUpgraded
+                        }
+                    }
+                )
+                
+                let negotiationResultFuture = try channel.pipeline.syncOperations.configureUpgradableHTTPClientPipeline(
+                    configuration: .init(
+                        upgradeConfiguration: clientUpgradeConfiguration))
+                return negotiationResultFuture
+            }
+        }
         
         /// Creates handlers for the channel and adds them to the pipeline.
         ///
@@ -802,19 +885,54 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         ///   - server: The `ServerLocation` associated with the channel.
         /// - Returns: An `EventLoopFuture` containing the `NIOAsyncChannel`.
         @Sendable func createHandlers(_ channel: Channel, server: ServerLocation) -> EventLoopFuture<NIOAsyncChannel<Inbound, Outbound>> {
-            
             let monitor = NetworkEventMonitor(connectionIdentifier: server.cacheKey)
-            
             return channel.eventLoop.makeCompletedFuture {
                 try channel.pipeline.syncOperations.addHandler(monitor)
                 if let channelHandlers = delegate?.retrieveChannelHandlers(), !channelHandlers.isEmpty {
                     try channel.pipeline.syncOperations.addHandlers(channelHandlers)
                 }
-                
                 return try NIOAsyncChannel<Inbound, Outbound>(
                     wrappingChannelSynchronously: channel)
             }
         }
+    }
+    
+    public func connectWebSocket(
+        to servers: [ServerLocation],
+        maxReconnectionAttempts: Int = 6,
+        timeout: TimeAmount = .seconds(10),
+        tlsPreKeyed: TLSPreKeyedConfiguration? = nil,
+        retryStrategy: RetryStrategy = .fixed(delay: .seconds(5))
+    ) async throws {
+        enabledWebsocket = true
+        for await server in servers.async {
+            try await attemptConnection(
+                to: server,
+                currentAttempt: 0,
+                maxAttempts: maxReconnectionAttempts,
+                timeout: timeout,
+                tlsPreKeyed: tlsPreKeyed,
+                retryStrategy: retryStrategy)
+        }
+        
+        if serviceGroup == nil {
+            serviceGroup = await ServiceGroup(
+                services: connectionCache.fetchAllConnections(),
+                logger: .init(label: "Connection Manager"))
+            let group = serviceGroup
+            serviceLifecycleTask = Task {
+                do {
+                    try await group?.run()
+                } catch {
+                    // Intentionally ignore; shutdown is coordinated via gracefulShutdown
+                }
+            }
+        }
+    }
+
+    enum UpgradeResult {
+        case websocket(NIOAsyncChannel<WebSocketFrame, WebSocketFrame>)
+        case notUpgraded
     }
     
     /// Monitors events from the `NetworkEventMonitor` and delegates them to the appropriate server delegates.

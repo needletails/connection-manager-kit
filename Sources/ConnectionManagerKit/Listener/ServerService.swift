@@ -9,11 +9,37 @@ import NIOCore
 import NIOPosix
 import NIOSSL
 import NIOExtras
+import NIOHTTP1
+import NIOWebSocket
 import ServiceLifecycle
 import NeedleTailLogger
 import AsyncAlgorithms
 
-
+// Add to ConnectionListener without breaking existing API
+public struct WebSocketUpgradeConfig: Sendable {
+    public let subprotocols: [String]
+    public let customHeaders: HTTPHeaders
+    public let minNonFinalFragmentSize: Int
+    public let maxAccumulatedFrameCount: Int
+    public let maxAccumulatedFrameSize: Int
+    public let maxFrameSize: Int
+    
+    public init(
+        subprotocols: [String] = [],
+        customHeaders: HTTPHeaders = HTTPHeaders(),
+        minNonFinalFragmentSize: Int = 0,
+        maxAccumulatedFrameCount: Int = Int.max,
+        maxAccumulatedFrameSize: Int = Int.max,
+        maxFrameSize: Int = 1 << 14
+    ) {
+        self.subprotocols = subprotocols
+        self.customHeaders = customHeaders
+        self.minNonFinalFragmentSize = minNonFinalFragmentSize
+        self.maxAccumulatedFrameCount = maxAccumulatedFrameCount
+        self.maxAccumulatedFrameSize = maxAccumulatedFrameSize
+        self.maxFrameSize = maxFrameSize
+    }
+}
 
 actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
     
@@ -39,21 +65,26 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
     private var connectionMetrics: [String: ConnectionMetrics] = [:]
     private var cleanupTask: Task<Void, Never>?
     private var isShuttingDown = false
+    private var createWebsocketServer: Bool = false
+    nonisolated(unsafe) internal var websocketConfiguration: WebSocketUpgradeConfig?
     
-
-
     public func setContextDelegate(_ contextDelegate: ChannelContextDelegate, key: String) async {
         self.contextDelegates[key] = contextDelegate
     }
     
     init(
-        address: SocketAddress, 
+        websocketConfiguration: WebSocketUpgradeConfig? = nil,
+        address: SocketAddress,
         configuration: Configuration,
         logger: NeedleTailLogger,
         delegate: ChildChannelServiceDelegate,
         listenerDelegate: ListenerDelegate?,
         serviceListenerDelegate: ServiceListenerDelegate?
     ) {
+        if let websocketConfiguration {
+            self.createWebsocketServer = true
+            self.websocketConfiguration = websocketConfiguration
+        }
         self.address = address
         self.configuration = configuration
         self.logger = logger
@@ -74,14 +105,43 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
     
     private func executeTask() async throws {
         do {
-            let serverChannel = try await createServerChannel()
-            self.serverChannel = serverChannel
-            
-            // Notify listener delegate
-            await listenerDelegate?.didBindServer(channel: serverChannel)
-            
-            // Handle child channels with improved concurrency
-            try await handleChildChannelsOptimized(serverChannel: serverChannel)
+            if createWebsocketServer {
+                let serverChannel = try await createWebSocketChannel()
+                
+                await listenerDelegate?.didBindWebSocketServer(channel: serverChannel)
+                
+                    try await serverChannel.executeThenClose { @Sendable inbound in
+                        try await withThrowingDiscardingTaskGroup { group in
+                        for try await childChannelFuture in inbound.cancelOnGracefulShutdown() {
+                            let childChannel = try await childChannelFuture.get()
+                            guard await canAcceptConnection() else {
+                                logger.log(level: .warning, message: "Connection limit reached, rejecting new connection")
+                                try? await childChannel.channel.close()
+                                continue
+                            }
+                            
+                            // Accept connection and increment counter
+                            await incrementActiveConnections()
+                            
+                            // Handle child channel with timeout and error recovery
+                            group.addTask { [weak self] in
+                                guard let self else { return }
+                                await self.handleChildChannelWithRecovery(childChannel)
+                            }
+                        }
+                    }
+                }
+                
+            } else {
+                let serverChannel = try await createTCPServerChannel()
+                self.serverChannel = serverChannel
+                
+                // Notify listener delegate
+                await listenerDelegate?.didBindTCPServer(channel: serverChannel)
+                
+                // Handle child channels with improved concurrency
+                try await handleChildChannelsOptimized(serverChannel: serverChannel)
+            }
             
         } catch {
             logger.log(level: .error, message: "Server service failed: \(error)")
@@ -89,32 +149,105 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
         }
     }
     
-    private func createServerChannel() async throws -> NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never> {
+    enum Errors: Error {
+        case tlsNotConfigured, websocketUpgradeFailed
+    }
+
+    private func createWebSocketChannel() async throws -> NIOAsyncChannel<EventLoopFuture<NIOAsyncChannel<Inbound, Outbound>>, Never> {
+        
+        @Sendable
+        func handleWebSocketUpgrade(channel: Channel, request: HTTPRequestHead) -> EventLoopFuture<HTTPHeaders?> {
+            guard let headers = websocketConfiguration?.customHeaders else {
+                return channel.eventLoop.makeFailedFuture(Errors.websocketUpgradeFailed)
+            }
+            return channel.eventLoop.makeSucceededFuture(headers)
+        }
+        
+        @Sendable
+        func upgradeWebSocket(channel: Channel) -> EventLoopFuture<EventLoopFuture<NIOAsyncChannel<Inbound, Outbound>>> {
+            return channel.eventLoop.makeCompletedFuture {
+                
+                guard let configuration = websocketConfiguration else {
+                    throw Errors.websocketUpgradeFailed
+                }
+                let upgrader = NIOTypedWebSocketServerUpgrader<NIOAsyncChannel<Inbound, Outbound>>(
+                    maxFrameSize: configuration.maxFrameSize,
+                    shouldUpgrade: { channel, head in
+                        return handleWebSocketUpgrade(channel: channel, request: head)
+                    },
+                    upgradePipelineHandler: { channel, handler in
+                        channel.eventLoop.makeCompletedFuture {
+                            try channel.pipeline.syncOperations.addHandler(
+                                NIOWebSocketFrameAggregator(
+                                    minNonFinalFragmentSize: configuration.minNonFinalFragmentSize,
+                                    maxAccumulatedFrameCount: configuration.maxAccumulatedFrameCount,
+                                    maxAccumulatedFrameSize: configuration.maxAccumulatedFrameSize))
+                            
+                            let asyncChannel = try NIOAsyncChannel<Inbound, Outbound>(
+                                wrappingChannelSynchronously: channel,
+                                configuration: .init(isOutboundHalfClosureEnabled: true)
+                            )
+                            return asyncChannel
+                        }
+                    }
+                )
+                
+                let serverUpgradeConfiguration = NIOTypedHTTPServerUpgradeConfiguration(
+                    upgraders: [upgrader],
+                    notUpgradingCompletionHandler: { channel in
+                        return channel.eventLoop.makeCompletedFuture {
+                            return try NIOAsyncChannel<Inbound, Outbound>(
+                                wrappingChannelSynchronously: channel)
+                        }
+                    })
+                
+                var upgradeConfiguration = NIOUpgradableHTTPServerPipelineConfiguration<NIOAsyncChannel<Inbound, Outbound>>(upgradeConfiguration: serverUpgradeConfiguration)
+                upgradeConfiguration.enablePipelining = false
+                upgradeConfiguration.enableResponseHeaderValidation = false
+                
+                let negotiationResultFuture = try channel.pipeline.syncOperations.configureUpgradableHTTPServerPipeline(
+                    configuration: upgradeConfiguration
+                )
+                return negotiationResultFuture
+            }
+        }
+
         return try await ServerBootstrap(group: configuration.group)
-            // Optimized server channel options
+        // Optimized server channel options
             .serverChannelOption(ChannelOptions.backlog, value: Int32(configuration.backlog))
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-            // Optimized child channel options
+        // Optimized child channel options
             .childChannelOption(ChannelOptions.socket(IPPROTO_TCP, TCP_NODELAY), value: 1)
             .childChannelOption(ChannelOptions.socketOption(.so_keepalive), value: 1)
             .childChannelOption(ChannelOptions.recvAllocator, value: AdaptiveRecvByteBufferAllocator())
             .childChannelOption(ChannelOptions.autoRead, value: true)
             .bind(to: address, childChannelInitializer: { channel in
-                return channel.eventLoop.makeCompletedFuture {
-                    
-                    // Add SSL handler if configured
+                    return upgradeWebSocket(channel: channel)
+            })
+        
+    }
+    
+    private func createTCPServerChannel() async throws -> NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never> {
+        return try await ServerBootstrap(group: configuration.group)
+        // Optimized server channel options
+            .serverChannelOption(ChannelOptions.backlog, value: Int32(configuration.backlog))
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+        // Optimized child channel options
+            .childChannelOption(ChannelOptions.socket(IPPROTO_TCP, TCP_NODELAY), value: 1)
+            .childChannelOption(ChannelOptions.socketOption(.so_keepalive), value: 1)
+            .childChannelOption(ChannelOptions.recvAllocator, value: AdaptiveRecvByteBufferAllocator())
+            .childChannelOption(ChannelOptions.autoRead, value: true)
+            .bind(to: address, childChannelInitializer: { channel in
+                channel.eventLoop.makeCompletedFuture {
                     if let sslHandler = self.serviceListenerDelegate?.retrieveSSLHandler() {
                         try channel.pipeline.syncOperations.addHandler(sslHandler)
                     }
-                    
-                    // Add custom channel handlers
                     if let channelHandlers = self.serviceListenerDelegate?.retrieveChannelHandlers(), !channelHandlers.isEmpty {
                         try channel.pipeline.syncOperations.addHandlers(channelHandlers)
                     }
-        
                     return try NIOAsyncChannel(wrappingChannelSynchronously: channel)
                 }
-        })
+            })
     }
     
     private func handleChildChannelsOptimized(
@@ -237,8 +370,6 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
     private func removeConnectionMetrics(channelId: String) {
         connectionMetrics.removeValue(forKey: channelId)
     }
-    
-
     
     private func stopTLS(from id: String) async {
         if let childChannel = self.channelContexts.first(where: { $0.id == id })?.channel {
