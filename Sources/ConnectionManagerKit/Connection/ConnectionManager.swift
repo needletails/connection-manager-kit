@@ -753,14 +753,28 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                 bootstrap.enableTLS()
             }
             
-            return try await client
-                .connectTimeout(timeout)
-                .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
-                .connect(
+            if enabledWebsocket {
+                let upgradeResult: EventLoopFuture<UpgradeResult> = try await client.connect(
                     host: server.host,
                     port: server.port) { channel in
-                        return createHandlers(channel, server: server)
+                        upgradeSocket(channel, server: server)
                     }
+                switch try await upgradeResult.get() {
+                case .websocket(let websocketChannel):
+                    return websocketChannel as! NIOAsyncChannel<Inbound, Outbound>
+                case .notUpgraded:
+                    throw Errors.websocketUpgradeFailed
+                }
+            } else {
+                return try await client
+                    .connectTimeout(timeout)
+                    .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
+                    .connect(
+                        host: server.host,
+                        port: server.port) { channel in
+                            return createHandlers(channel, server: server)
+                        }
+            }
         }
 #endif
         
@@ -795,11 +809,11 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
             let upgradeResult: EventLoopFuture<UpgradeResult> = try await connection.connect(
                 host: server.host,
                 port: server.port) { channel in
-                   upgradeSocket(channel, server: server)
+                    upgradeSocket(channel, server: server)
                 }
             switch try await upgradeResult.get() {
             case .websocket(let websocketChannel):
-                    return websocketChannel as! NIOAsyncChannel<Inbound, Outbound>
+                return websocketChannel as! NIOAsyncChannel<Inbound, Outbound>
             case .notUpgraded:
                 throw Errors.websocketUpgradeFailed
             }
@@ -826,7 +840,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                     throw Errors.websocketUpgradeFailed
                 }
                 
-
+                
                 let upgrader = NIOTypedWebSocketClientUpgrader<UpgradeResult>(
                     maxFrameSize: webSocketOptions.maxFrameSize,
                     enableAutomaticErrorHandling: true,
@@ -846,7 +860,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                 var headers = HTTPHeaders()
                 let needsPort = !(server.port == 80 || server.port == 443)
                 headers.add(name: "Host", value: needsPort ? "\(server.host):\(server.port)" : server.host)
-
+                
                 for (name, value) in webSocketOptions.headers {
                     headers.add(name: name, value: value)
                 }
@@ -860,7 +874,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                     uri: webSocketOptions.uri,
                     headers: headers
                 )
-
+                
                 let clientUpgradeConfiguration = NIOTypedHTTPClientUpgradeConfiguration(
                     upgradeRequestHead: requestHead,
                     upgraders: [upgrader],
@@ -929,7 +943,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
             }
         }
     }
-
+    
     enum UpgradeResult {
         case websocket(NIOAsyncChannel<WebSocketFrame, WebSocketFrame>)
         case notUpgraded

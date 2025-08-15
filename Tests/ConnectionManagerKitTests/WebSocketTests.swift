@@ -3,6 +3,7 @@ import NIOCore
 import NIOPosix
 import NIOWebSocket
 import NIOSSL
+import NIOFoundationCompat
 import Testing
 #if canImport(Network)
 import Network
@@ -44,7 +45,11 @@ final class MockWSConnectionDelegate<TestableInbound: Sendable, TestableOutbound
     #if canImport(Network)
     func handleError(_ stream: AsyncStream<NWError>, id: String) {}
     func handleNetworkEvents(_ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NetworkEvent>, id: String) async {}
+    #else
+    func handleError(_ stream: AsyncStream<IOError>, id: String) {}
+    func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NIOEvent>, id: String) async {}
     #endif
+    
     func initializedChildChannel<Outbound, Inbound>(_ context: ConnectionManagerKit.ChannelContext<Inbound, Outbound>) async where Outbound : Sendable, Inbound : Sendable {
         await listener.setContextDelegate(channelContextHandler, key: context.id)
     }
