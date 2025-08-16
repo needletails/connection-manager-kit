@@ -258,7 +258,7 @@ public actor WebSocketClient {
     }
     
     /// Errors thrown by the WebSocket client API.
-    enum Errors: Error {
+    public enum Errors: Error {
         /// The provided URL is not a valid ws/wss URL.
         case invalidURL
         /// No connection exists for the requested route.
