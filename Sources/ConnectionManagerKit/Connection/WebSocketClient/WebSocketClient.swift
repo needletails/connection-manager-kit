@@ -7,6 +7,7 @@
 
 import Foundation
 import Observation
+import NIOFoundationCompat
 #if canImport(Network)
 import Network
 #endif
@@ -21,7 +22,7 @@ import Network
 public final class SocketReceiver: Sendable {
     
     /// Inbound WebSocket message kinds delivered to `messageStream`.
-    public enum WebSocketOpcode: Sendable {
+    public enum WebSocketOpcode: Sendable, Equatable {
         case text(String)
         case message(String?)
         case binary(Data?)
@@ -32,15 +33,39 @@ public final class SocketReceiver: Sendable {
     }
     
     /// Channel and network events delivered to `eventStream`.
-    public enum WebSocketEvent: Sendable {
+    public enum WebSocketEvent: Sendable, Equatable {
 #if canImport(Network)
-        case networkEvent(ConnectionManagerKit.NetworkEventMonitor.NetworkEvent)
+        case networkEvent(NetworkEventMonitor.NetworkEvent)
 #else
-        case networkEvent(ConnectionManagerKit.NetworkEventMonitor.NIOEvent)
+        case networkEvent(NetworkEventMonitor.NIOEvent)
 #endif
         case error(Error)
         case channelActive
         case channelInactive
+        
+        public static func == (
+            lhs: WebSocketEvent,
+            rhs: WebSocketEvent
+        ) -> Bool {
+            switch (lhs, rhs) {
+            case (.channelActive, .channelActive),
+                 (.channelInactive, .channelInactive):
+                return true
+
+            case let (.networkEvent(a), .networkEvent(b)):
+#if canImport(Network)
+                // NIOTS NetworkEvent associated values are not Equatable; compare descriptions.
+                return String(describing: a) == String(describing: b)
+#else
+                return a == b
+#endif
+
+            case let (.error(errA), .error(errB)):
+                return String(describing: errA) == String(describing: errB)
+            default:
+                return false
+            }
+        }
     }
     
     public var webSocketFrame: WebSocketOpcode?
@@ -80,9 +105,9 @@ public final class SocketReceiver: Sendable {
         }
         webSocketFrame = message
     }
-    
+#if canImport(Network)
     /// Internal: updates observed state and emits a Network event to `eventStream`.
-    public func setNetworkEvent(_ event: ConnectionManagerKit.NetworkEventMonitor.NetworkEvent) {
+    public func setNetworkEvent(_ event: NetworkEventMonitor.NetworkEvent) {
         if eventStream == nil {
             makeEventStream()
         }
@@ -96,8 +121,7 @@ public final class SocketReceiver: Sendable {
         }
         self.networkEvent = .networkEvent(event)
     }
-    
-#if !canImport(Network)
+#else
     /// Internal (Linux): updates observed state and emits an NIO event to `eventStream`.
     public func setNIOEvent(_ event: ConnectionManagerKit.NetworkEventMonitor.NIOEvent) {
         if eventStream == nil {
@@ -189,7 +213,7 @@ private final class WSConnectionDelegate: ConnectionDelegate, @unchecked Sendabl
         }
     }
     
-    func handleNetworkEvents(_ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NetworkEvent>, id: String) async {
+    func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>, id: String) async {
         if let handleNetworkEventsTask {
             handleNetworkEventsTask.cancel()
             self.handleNetworkEventsTask = nil
@@ -251,7 +275,8 @@ public actor WebSocketClient {
     @MainActor
     public static let shared = WebSocketClient(socketReceiver: .init())
     
-    let socketReceiver: SocketReceiver
+    @MainActor
+    public let socketReceiver: SocketReceiver
     
     init(socketReceiver: SocketReceiver) {
         self.socketReceiver = socketReceiver

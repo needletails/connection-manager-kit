@@ -1812,11 +1812,11 @@ final class MockConnectionDelegate<TestInbound: Sendable, TestOutbound: Sendable
 #if canImport(Network)
     func handleError(_ stream: AsyncStream<NWError>, id: String) {}
     
-    func handleNetworkEvents(_ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NetworkEvent>, id: String) async {}
+    func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>, id: String) async {}
 #else
     func handleError(_ stream: AsyncStream<IOError>, id: String) {}
     
-    func handleNetworkEvents(_ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NIOEvent>, id: String) async {}
+    func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NIOEvent>, id: String) async {}
 #endif
     
     func initializedChildChannel<Outbound, Inbound>(
@@ -1857,7 +1857,7 @@ final class MockConnectionDelegate<TestInbound: Sendable, TestOutbound: Sendable
     }
     
     func handleNetworkEvents(
-        _ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NetworkEvent>
+        _ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>
     ) {
         networkEventTask = Task {
             for await event in stream.cancelOnGracefulShutdown() {

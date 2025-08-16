@@ -305,9 +305,17 @@ public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendab
     ///
     /// This enum provides a wrapper for NIO-specific events that may occur
     /// during network operations.
-    public enum NIOEvent: @unchecked Sendable {
+    public enum NIOEvent: @unchecked Sendable, Equatable {
         /// A generic NIO event.
         case event(Any)
+
+        public static func == (lhs: NIOEvent, rhs: NIOEvent) -> Bool {
+            switch (lhs, rhs) {
+            case let (.event(a), .event(b)):
+                // Fallback equality by description since `Any` is not Equatable
+                return String(describing: a) == String(describing: b)
+            }
+        }
     }
 #endif
     

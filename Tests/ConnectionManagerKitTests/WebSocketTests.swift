@@ -44,7 +44,7 @@ final class MockWSConnectionDelegate<TestableInbound: Sendable, TestableOutbound
     
 #if canImport(Network)
     func handleError(_ stream: AsyncStream<NWError>, id: String) {}
-    func handleNetworkEvents(_ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NetworkEvent>, id: String) async {}
+    func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>, id: String) async {}
 #else
     func handleError(_ stream: AsyncStream<IOError>, id: String) {}
     func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NIOEvent>, id: String) async {}
