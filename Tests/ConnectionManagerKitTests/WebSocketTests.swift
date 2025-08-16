@@ -42,13 +42,13 @@ final class MockWSConnectionDelegate<TestableInbound: Sendable, TestableOutbound
     }
     
     
-    #if canImport(Network)
+#if canImport(Network)
     func handleError(_ stream: AsyncStream<NWError>, id: String) {}
     func handleNetworkEvents(_ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NetworkEvent>, id: String) async {}
-    #else
+#else
     func handleError(_ stream: AsyncStream<IOError>, id: String) {}
     func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NIOEvent>, id: String) async {}
-    #endif
+#endif
     
     func initializedChildChannel<Outbound, Inbound>(_ context: ConnectionManagerKit.ChannelContext<Inbound, Outbound>) async where Outbound : Sendable, Inbound : Sendable {
         await listener.setContextDelegate(channelContextHandler, key: context.id)
@@ -72,18 +72,18 @@ final class MockWSClientDelegate: ChannelContextDelegate, @unchecked Sendable {
         self.operation = operation
         self.completion = completion
     }
-
+    
     func deliverWriter<Outbound, Inbound>(context: WriterContext<Inbound, Outbound>) async where Outbound : Sendable, Inbound : Sendable {
         guard Outbound.self == WebSocketFrame.self else { return }
         let writer = context.writer as! NIOAsyncChannelOutboundWriter<WebSocketFrame>
         self.writer = writer
     }
-
+    
     func deliverInboundBuffer<Inbound, Outbound>(context: StreamContext<Inbound, Outbound>) async where Inbound : Sendable, Outbound : Sendable {
         guard let frame = context.inbound as? WebSocketFrame else { return }
         completion.yield(frame)
     }
-
+    
     func channelActive(_ stream: AsyncStream<Void>, id: String) {}
     
     func channelInactive(_ stream: AsyncStream<Void>, id: String) {
@@ -143,15 +143,15 @@ struct WebSocketTests {
                 }
             }
         }
-
+        
         try await Task.sleep(for: .milliseconds(100))
-
+        
         // Setup client
         let manager = ConnectionManager<WebSocketFrame, WebSocketFrame>()
-
+        
         let (completionStream, completionContinuation) = AsyncStream<WebSocketFrame>.makeStream()
         let clientDelegate = MockWSClientDelegate(completion: completionContinuation)
-
+        
         let server = ServerLocation(
             host: "localhost",
             port: port,
@@ -160,7 +160,7 @@ struct WebSocketTests {
             delegate: nil,
             contextDelegate: clientDelegate
         )
-
+        
         Task {
             try await manager.connectWebSocket(to: [server])
         }
@@ -183,12 +183,13 @@ struct WebSocketTests {
         
         // Verify pong was received
         #expect(pongReceived == true, "Expected pong frame was not received")
-
+        
         // Cleanup
         await manager.gracefulShutdown()
         serverTask.cancel()
         serverResponseTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(200))
     }
     
     // MARK: - Text Frame Tests
@@ -226,15 +227,15 @@ struct WebSocketTests {
                 }
             }
         }
-
+        
         try await Task.sleep(for: .milliseconds(100))
-
+        
         // Setup client
         let manager = ConnectionManager<WebSocketFrame, WebSocketFrame>()
         
         let (completionStream, completionContinuation) = AsyncStream<WebSocketFrame>.makeStream()
         let clientDelegate = MockWSClientDelegate(completion: completionContinuation)
-
+        
         let server = ServerLocation(
             host: "localhost",
             port: port,
@@ -243,7 +244,7 @@ struct WebSocketTests {
             delegate: nil,
             contextDelegate: clientDelegate
         )
-
+        
         Task {
             try await manager.connectWebSocket(to: [server])
         }
@@ -266,12 +267,13 @@ struct WebSocketTests {
         
         // Verify echo was received
         #expect(echoReceived == true, "Expected text echo frame was not received")
-
+        
         // Cleanup
         await manager.gracefulShutdown()
         serverTask.cancel()
         serverResponseTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(200))
     }
     
     // MARK: - Binary Frame Tests
@@ -309,15 +311,15 @@ struct WebSocketTests {
                 }
             }
         }
-
+        
         try await Task.sleep(for: .milliseconds(100))
-
+        
         // Setup client
         let manager = ConnectionManager<WebSocketFrame, WebSocketFrame>()
         
         let (completionStream, completionContinuation) = AsyncStream<WebSocketFrame>.makeStream()
         let clientDelegate = MockWSClientDelegate(completion: completionContinuation)
-
+        
         let server = ServerLocation(
             host: "localhost",
             port: port,
@@ -326,7 +328,7 @@ struct WebSocketTests {
             delegate: nil,
             contextDelegate: clientDelegate
         )
-
+        
         Task {
             try await manager.connectWebSocket(to: [server])
         }
@@ -349,12 +351,13 @@ struct WebSocketTests {
         
         // Verify echo was received
         #expect(echoReceived == true, "Expected binary echo frame was not received")
-
+        
         // Cleanup
         await manager.gracefulShutdown()
         serverTask.cancel()
         serverResponseTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(200))
     }
     
     // MARK: - Close Frame Tests
@@ -393,15 +396,15 @@ struct WebSocketTests {
                 }
             }
         }
-
+        
         try await Task.sleep(for: .milliseconds(100))
-
+        
         // Setup client
         let manager = ConnectionManager<WebSocketFrame, WebSocketFrame>()
         
         let (completionStream, completionContinuation) = AsyncStream<WebSocketFrame>.makeStream()
         let clientDelegate = MockWSClientDelegate(operation: .sendClose, completion: completionContinuation)
-
+        
         let server = ServerLocation(
             host: "localhost",
             port: port,
@@ -410,7 +413,7 @@ struct WebSocketTests {
             delegate: nil,
             contextDelegate: clientDelegate
         )
-
+        
         Task {
             try await manager.connectWebSocket(to: [server])
         }
@@ -440,12 +443,452 @@ struct WebSocketTests {
         
         // Verify close response was received
         #expect(closeResponseReceived == true, "Expected close response frame was not received")
-
+        
         // Cleanup
         await manager.gracefulShutdown()
         serverTask.cancel()
         serverResponseTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(200))
+    }
+    
+    // MARK: - WebSocket Class Tests
+    @Test("WebSocket class URL connection")
+    func testWebSocketClassURLConnection() async throws {
+        let port = 6697
+        
+        // Setup server
+        let listener = ConnectionListener<WebSocketFrame, WebSocketFrame>()
+        let listenerDelegate = WSServerListenerDelegate()
+        let config = ConnectionManagerKit.Configuration(group: .singletonMultiThreadedEventLoopGroup, host: "127.0.0.1", port: port)
+        let resolved = try await listener.resolveAddress(config)
+        let (serverChannelCompletionStream, serverChannelCompletionContinuation) = AsyncStream<WebSocketFrame>.makeStream()
+        let serverClientDelegate = MockWSClientDelegate(completion: serverChannelCompletionContinuation)
+        let connectionDelegate = MockWSConnectionDelegate(lisenter: listener, channelContextHandler: serverClientDelegate)
+        
+        let serverTask = Task {
+            try await listener.listen(
+                address: resolved.address!,
+                websocketConfiguration: .init(),
+                configuration: resolved,
+                delegate: connectionDelegate,
+                listenerDelegate: listenerDelegate)
+        }
+        
+        try await Task.sleep(for: .milliseconds(500))
+        
+        let serverResponseTask = Task {
+            for await _ in serverChannelCompletionStream {
+                break
+            }
+        }
+        
+        try await Task.sleep(for: .milliseconds(100))
+        
+        // Test WebSocket class connection with URL using singleton
+        let webSocket = await WebSocketClient.shared
+        let url = URL(string: "ws://localhost:\(port)/test-route")!
+        
+        try await webSocket.connect(url: url)
+        
+        try await Task.sleep(for: .seconds(2))
+        
+        // Safely unwrap the optional AsyncSequence
+        guard let eventStream = await webSocket.socketReceiver.eventStream else {
+            // Handle the missing stream (e.g., throw or return)
+            return
+        }
+        
+        // Wait for event response by monitoring the server's completion stream
+        for try await event in eventStream {
+            switch event {
+            case .networkEvent(let event):
+                switch event {
+                case .viabilityChanged(let changed):
+                    #expect(changed.isViable)
+                    await webSocket.socketReceiver.eventContinuation?.finish()
+                default:
+                    break
+                }
+            default:
+               break
+            }
+        }
+        
+        // Cleanup
+        await webSocket.shutDown()
+        serverTask.cancel()
+        serverResponseTask.cancel()
+        await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(200))
+    }
+    
+    @Test("WebSocket class invalid URL")
+    func testWebSocketClassInvalidURL() async throws {
+        let webSocket = await WebSocketClient.shared
+        
+        // Test with invalid URL using singleton
+        do {
+            try await webSocket.connect(
+                url: URL(string: "invalid://url")!,
+                maxReconnectionAttempts: 1,
+                timeout: .seconds(2),
+                retryStrategy: .fixed(delay:.seconds(2)))
+        } catch WebSocketClient.Errors.invalidURL {
+            // Expected error
+            #expect(true)
+        } catch {
+            #expect(Bool(false), "Unexpected error: \(error)")
+        }
+        try await Task.sleep(for: .milliseconds(200))
+    }
+    
+    @Test("WebSocket class send text message")
+    func testWebSocketClassSendTextMessage() async throws {
+        let port = 6702
+        let testMessage = "Hello from WebSocket class!"
+        
+        // Setup server
+        let listener = ConnectionListener<WebSocketFrame, WebSocketFrame>()
+        let listenerDelegate = WSServerListenerDelegate()
+        let config = ConnectionManagerKit.Configuration(group: .singletonMultiThreadedEventLoopGroup, host: "127.0.0.1", port: port)
+        let resolved = try await listener.resolveAddress(config)
+        let (serverChannelCompletionStream, serverChannelCompletionContinuation) = AsyncStream<WebSocketFrame>.makeStream()
+        let serverClientDelegate = MockWSClientDelegate(completion: serverChannelCompletionContinuation)
+        let connectionDelegate = MockWSConnectionDelegate(lisenter: listener, channelContextHandler: serverClientDelegate)
+        
+        let serverTask = Task {
+            try await listener.listen(
+                address: resolved.address!,
+                websocketConfiguration: .init(),
+                configuration: resolved,
+                delegate: connectionDelegate,
+                listenerDelegate: listenerDelegate
+            )
+        }
+        try await Task.sleep(for: .milliseconds(500))
+        // Server echo handler
+        let serverResponseTask = Task {
+            for await frame in serverChannelCompletionStream {
+                if frame.opcode == .text {
+                    // Echo back the text frame
+                    let echoFrame = WebSocketFrame(fin: true, opcode: .text, data: frame.data)
+                    try await serverClientDelegate.writer?.write(echoFrame)
+                }
+            }
+        }
+        try await Task.sleep(for: .milliseconds(500))
+       
+        
+        // Test WebSocket class using singleton
+        let webSocket = await WebSocketClient.shared
+        try await webSocket.connect(host: "localhost", port: port, enableTLS: false, route: "/text")
+        
+        // Wait until channel is active to avoid race conditions
+        if let eventStream = await webSocket.socketReceiver.eventStream {
+            for try await event in eventStream {
+                if case .channelActive = event { break }
+            }
+        } else {
+            try await Task.sleep(for: .seconds(1))
+        }
+        
+        // Send text message
+        try await webSocket.sendText(testMessage, to: "/text")
+        try await Task.sleep(for: .seconds(2))
+        
+        // Wait for echo response by monitoring the server's completion stream
+        var echoReceived = false
+        // Safely unwrap the optional AsyncSequence
+        guard let messageStream = await webSocket.socketReceiver.messageStream else {
+            // Handle the missing stream (e.g., throw or return)
+            return
+        }
+        
+        for try await frame in messageStream {
+            if case let .text(message) = frame {
+                // Extract String from ByteBuffer
+                #expect(message == testMessage)
+                echoReceived = true
+                break
+            }
+        }
+        
+        // Verify echo was received
+        #expect(echoReceived == true, "Expected text echo was not received")
+        
+        // Cleanup
+        await webSocket.shutDown()
+        serverTask.cancel()
+        serverResponseTask.cancel()
+        await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(500))
+    }
+    
+    @Test("WebSocket class send binary message")
+    func testWebSocketClassSendBinaryMessage() async throws {
+        let port = 6704
+        let testData = "Binary data from WebSocket class".data(using: .utf8)!
+        
+        // Setup server
+        let listener = ConnectionListener<WebSocketFrame, WebSocketFrame>()
+        let listenerDelegate = WSServerListenerDelegate()
+        let config = ConnectionManagerKit.Configuration(group: .singletonMultiThreadedEventLoopGroup, host: "127.0.0.1", port: port)
+        let resolved = try await listener.resolveAddress(config)
+        let (serverChannelCompletionStream, serverChannelCompletionContinuation) = AsyncStream<WebSocketFrame>.makeStream()
+        let serverClientDelegate = MockWSClientDelegate(completion: serverChannelCompletionContinuation)
+        let connectionDelegate = MockWSConnectionDelegate(lisenter: listener, channelContextHandler: serverClientDelegate)
+        
+        let serverTask = Task {
+            try await listener.listen(
+                address: resolved.address!,
+                websocketConfiguration: .init(),
+                configuration: resolved,
+                delegate: connectionDelegate,
+                listenerDelegate: listenerDelegate
+            )
+        }
+        
+        // Server binary echo handler
+        let serverResponseTask = Task {
+            for await frame in serverChannelCompletionStream {
+                if frame.opcode == .binary {
+                    // Echo back the binary frame
+                    let echoFrame = WebSocketFrame(fin: true, opcode: .binary, data: frame.data)
+                    try await serverClientDelegate.writer?.write(echoFrame)
+                }
+            }
+        }
+        
+        try await Task.sleep(for: .milliseconds(500))
+        
+        // Test WebSocket class using singleton
+        let webSocket = await WebSocketClient.shared
+        try await webSocket.connect(host: "localhost", port: port, enableTLS: false, route: "/binary")
+        
+        // Wait until channel is active to avoid race conditions
+        if let eventStream = await webSocket.socketReceiver.eventStream {
+            for try await event in eventStream {
+                if case .channelActive = event { break }
+            }
+        } else {
+            try await Task.sleep(for: .seconds(1))
+        }
+        
+        // Send binary message
+        try await webSocket.sendBinary(testData, to: "/binary")
+        try await Task.sleep(for: .seconds(2))
+        
+        // Wait for echo response by monitoring the server's completion stream
+        var echoReceived = false
+        // Safely unwrap the optional AsyncSequence
+        guard let messageStream = await webSocket.socketReceiver.messageStream else {
+            // Handle the missing stream (e.g., throw or return)
+            return
+        }
+        
+        for try await frame in messageStream {
+            if case let .binary(receivedData) = frame {
+                // Extract String from ByteBuffer
+                #expect(receivedData == testData)
+                echoReceived = true
+                break
+            }
+        }
+        
+        // Verify echo was received
+        #expect(echoReceived == true, "Expected binary echo was not received")
+        
+        // Cleanup
+        await webSocket.shutDown()
+        serverTask.cancel()
+        serverResponseTask.cancel()
+        await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(500))
+    }
+    
+    @Test("WebSocket class ping/pong")
+    func testWebSocketClassPingPong() async throws {
+        let port = 6701
+        let pingData = "ping-data-from-class".data(using: .utf8)!
+        
+        // Setup server
+        let listener = ConnectionListener<WebSocketFrame, WebSocketFrame>()
+        let listenerDelegate = WSServerListenerDelegate()
+        let config = ConnectionManagerKit.Configuration(group: .singletonMultiThreadedEventLoopGroup, host: "127.0.0.1", port: port)
+        let resolved = try await listener.resolveAddress(config)
+        let (serverChannelCompletionStream, serverChannelCompletionContinuation) = AsyncStream<WebSocketFrame>.makeStream()
+        let serverClientDelegate = MockWSClientDelegate(completion: serverChannelCompletionContinuation)
+        let connectionDelegate = MockWSConnectionDelegate(lisenter: listener, channelContextHandler: serverClientDelegate)
+        
+        let serverTask = Task {
+            try await listener.listen(
+                address: resolved.address!,
+                websocketConfiguration: .init(),
+                configuration: resolved,
+                delegate: connectionDelegate,
+                listenerDelegate: listenerDelegate
+            )
+        }
+        
+        // Server ping/pong handler
+        let serverResponseTask = Task {
+            for await frame in serverChannelCompletionStream {
+                if frame.opcode == .ping {
+                    // Send pong response
+                    let pongFrame = WebSocketFrame(fin: true, opcode: .pong, data: frame.data)
+                    try await serverClientDelegate.writer?.write(pongFrame)
+                }
+            }
+        }
+        
+        try await Task.sleep(for: .milliseconds(500))
+        
+        // Test WebSocket class using singleton
+        let webSocket = await WebSocketClient.shared
+        try await webSocket.connect(host: "localhost", port: port, enableTLS: false, route: "/ping")
+        
+        try await Task.sleep(for: .seconds(2))
+        
+        // Send ping
+        try await webSocket.sendPing(pingData, to: "/ping")
+        
+        try await Task.sleep(for: .seconds(2))
+        
+        // Safely unwrap the optional AsyncSequence
+        guard let messageStream = await webSocket.socketReceiver.messageStream else {
+            // Handle the missing stream (e.g., throw or return)
+            return
+        }
+        
+        // Wait for pong response by monitoring the server's completion stream
+        var pongReceived = false
+        for try await frame in messageStream {
+            if case let .pong(receivedData) = frame {
+                // Extract String from ByteBuffer
+                #expect(receivedData == pingData)
+                pongReceived = true
+                break
+            }
+        }
+        
+        // Verify ping was received by server
+        #expect(pongReceived == true, "Expected ping was not received by server")
+        
+        // Cleanup
+        await webSocket.shutDown()
+        serverTask.cancel()
+        serverResponseTask.cancel()
+        await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(500))
+    }
+    
+    @Test("WebSocket class multiple routes")
+    func testWebSocketClassMultipleRoutes() async throws {
+        let port = 6703
+        
+        // Setup server
+        let listener = ConnectionListener<WebSocketFrame, WebSocketFrame>()
+        let listenerDelegate = WSServerListenerDelegate()
+        let config = ConnectionManagerKit.Configuration(group: .singletonMultiThreadedEventLoopGroup, host: "127.0.0.1", port: port)
+        let resolved = try await listener.resolveAddress(config)
+        let (_, serverChannelCompletionContinuation) = AsyncStream<WebSocketFrame>.makeStream()
+        let serverClientDelegate = MockWSClientDelegate(completion: serverChannelCompletionContinuation)
+        let connectionDelegate = MockWSConnectionDelegate(lisenter: listener, channelContextHandler: serverClientDelegate)
+        
+        let serverTask = Task {
+            try await listener.listen(
+                address: resolved.address!,
+                websocketConfiguration: .init(),
+                configuration: resolved,
+                delegate: connectionDelegate,
+                listenerDelegate: listenerDelegate
+            )
+        }
+        
+        try await Task.sleep(for: .milliseconds(500))
+        
+        // Test WebSocket class with multiple routes using singleton
+        let webSocket = await WebSocketClient.shared
+        
+        await #expect(throws: Never.self, performing: {
+            // Connect to multiple routes
+            try await webSocket.connect(host: "localhost", port: port, enableTLS: false, route: "/route1")
+            try await webSocket.connect(host: "localhost", port: port, enableTLS: false, route: "/route2")
+            try await webSocket.connect(host: "localhost", port: port, enableTLS: false, route: "/route3")
+        })
+        
+        // Verify all connections were established
+        // Note: connections property is private, so we can't directly verify it
+        // Instead, we verify the connections were successful by checking no errors were thrown
+        #expect(true) // All connections succeeded without throwing
+        
+        // Test disconnecting specific route
+        await webSocket.disconnect("/route2")
+        // Note: connections property is private, so we can't directly verify it
+        #expect(true) // Disconnect succeeded without throwing
+        
+        // Cleanup
+        await webSocket.shutDown()
+        serverTask.cancel()
+        await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(200))
+    }
+    
+    @Test("WebSocket class test event stream")
+    func testEventStreamFromConnection() async throws {
+        let port = 6699
+        
+        // Setup server
+        let listener = ConnectionListener<WebSocketFrame, WebSocketFrame>()
+        let listenerDelegate = WSServerListenerDelegate()
+        let config = ConnectionManagerKit.Configuration(group: .singletonMultiThreadedEventLoopGroup, host: "127.0.0.1", port: port)
+        let resolved = try await listener.resolveAddress(config)
+        let (_, serverChannelCompletionContinuation) = AsyncStream<WebSocketFrame>.makeStream()
+        let serverClientDelegate = MockWSClientDelegate(completion: serverChannelCompletionContinuation)
+        let connectionDelegate = MockWSConnectionDelegate(lisenter: listener, channelContextHandler: serverClientDelegate)
+        
+        let serverTask = Task {
+            try await listener.listen(
+                address: resolved.address!,
+                websocketConfiguration: .init(),
+                configuration: resolved,
+                delegate: connectionDelegate,
+                listenerDelegate: listenerDelegate
+            )
+        }
+        
+        try await Task.sleep(for: .milliseconds(500))
+        
+        // Test WebSocket class connection with URL using singleton
+        let webSocket = await WebSocketClient.shared
+        let url = URL(string: "ws://localhost:\(port)/")!
+        try await webSocket.connect(url: url)
+        
+        try await Task.sleep(for: .seconds(2))
+        
+        // Safely unwrap the optional AsyncSequence
+        guard let eventStream = await webSocket.socketReceiver.eventStream else {
+            // Handle the missing stream (e.g., throw or return)
+            return
+        }
+        
+        // Wait for event response by monitoring the server's completion stream
+        for try await event in eventStream {
+            switch event {
+            case .channelActive:
+                #expect(true)
+                await webSocket.socketReceiver.eventContinuation?.finish()
+            default:
+               break
+            }
+        }
+
+        // Cleanup
+        await webSocket.shutDown()
+        serverTask.cancel()
+        await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(200))
     }
 }
 

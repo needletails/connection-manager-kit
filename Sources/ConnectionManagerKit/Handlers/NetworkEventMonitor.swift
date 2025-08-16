@@ -6,12 +6,14 @@
 //
 import NIOCore
 import NIOConcurrencyHelpers
-#if os(Linux)
+import Atomics
+#if canImport(Glibc)
 import Glibc
+#elseif canImport(Android)
+import Android
 #else
 import System
 #endif
-import Atomics
 #if canImport(Network)
 import Network
 import NIOTransportServices

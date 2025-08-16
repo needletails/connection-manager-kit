@@ -223,30 +223,31 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
         inbound: NIOAsyncChannelInboundStream<Inbound>,
         outbound: NIOAsyncChannelOutboundWriter<Outbound>
     ) -> (AsyncStream<NIOAsyncChannelInboundStream<Inbound>>, AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>) {
-        // set up async streams and handle data
-        let _outbound = AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>> { continuation in
-            continuation.yield(outbound)
-            self.continuation = continuation
-            
-            continuation.onTermination = { [weak self] status in
+        // Set up async streams without capturing the actor in producer closures
+        let (_outbound, outboundCont) = AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.makeStream()
+        self.continuation = outboundCont
+        outboundCont.onTermination = { [weak self] status in
 #if DEBUG
+            Task { [weak self] in
                 guard let self else { return }
                 self.logger.log(level: .trace, message: "Writer Stream Terminated with status: \(status)")
-#endif
             }
+#endif
         }
-        
-        let _inbound = AsyncStream<NIOAsyncChannelInboundStream<Inbound>> { continuation in
-            continuation.yield(inbound)
-            self.inboundContinuation = continuation
-            
-            continuation.onTermination = { [weak self] status in
+        outboundCont.yield(outbound)
+
+        let (_inbound, inboundCont) = AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.makeStream()
+        self.inboundContinuation = inboundCont
+        inboundCont.onTermination = { [weak self] status in
 #if DEBUG
+            Task { [weak self] in
                 guard let self else { return }
                 self.logger.log(level: .trace, message: "Inbound Stream Terminated with status: \(status)")
-#endif
             }
+#endif
         }
+        inboundCont.yield(inbound)
+
         return (_inbound, _outbound)
     }
     

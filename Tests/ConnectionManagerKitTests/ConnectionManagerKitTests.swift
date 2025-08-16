@@ -4,8 +4,10 @@ import NIOPosix
 import NIOSSL
 import NIOExtras
 import Testing
-#if os(Linux)
+#if canImport(Glibc)
 import Glibc
+#elseif canImport(Android)
+import Android
 #else
 import System
 #endif
@@ -77,6 +79,7 @@ struct ConnectionManagerKitTests {
         
         try await Task.sleep(until: .now + .milliseconds(100))
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
     }
     
     @Test("Server should resolve address correctly")
@@ -163,6 +166,7 @@ struct ConnectionManagerKitTests {
         extraConnection.cancel()
         serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
     }
 
     @Test("Listener metrics should update on connection accept/close")
@@ -326,7 +330,9 @@ struct ConnectionManagerKitTests {
         try await Task.sleep(until: .now + .milliseconds(500))
         serverTask.cancel()
         connectionTask.cancel()
+        await manager.gracefulShutdown()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
         
         // Verify that connections were attempted
         await #expect(manager.connectionCache.count >= 0)
@@ -489,8 +495,10 @@ struct ConnectionManagerKitTests {
         #expect(retrievedHandlers.count >= 0)
         
         // Cleanup
+        await manager.gracefulShutdown()
         serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
     }
     
     @Test("Connection manager should call channelCreated when channels are established")
@@ -547,8 +555,10 @@ struct ConnectionManagerKitTests {
         }
         
         // Cleanup
+        await manager.gracefulShutdown()
         serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
     }
     
     @Test("Connection manager should retrieve channel handlers from delegate")
@@ -604,8 +614,10 @@ struct ConnectionManagerKitTests {
         }
         
         // Cleanup
+        await manager.gracefulShutdown()
         serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
     }
     
     @Test("Connection manager should handle delegate methods correctly with multiple connections")
@@ -669,8 +681,10 @@ struct ConnectionManagerKitTests {
         #expect(retrievedHandlers.count >= 0)
         
         // Cleanup
+        await manager.gracefulShutdown()
         serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
     }
     
     @Test("Connection manager should work without delegate set")
@@ -716,8 +730,10 @@ struct ConnectionManagerKitTests {
         #expect(cachedConnections.count >= 0)
         
         // Cleanup
+        await manager.gracefulShutdown()
         serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
     }
     
     // MARK: - Connection Cache Tests
@@ -1471,8 +1487,10 @@ struct ConnectionManagerKitTests {
         #expect(cachedConnections.count >= 0)
         
         // Cleanup
+        await manager.gracefulShutdown()
         serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
     }
     
     @Test("Connection pooling should work with network events")
