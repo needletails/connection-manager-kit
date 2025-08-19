@@ -4,8 +4,10 @@ import NIOPosix
 import NIOSSL
 import NIOExtras
 import Testing
-#if os(Linux)
+#if canImport(Glibc)
 import Glibc
+#elseif canImport(Android)
+import Android
 #else
 import System
 #endif
@@ -27,7 +29,9 @@ final class ListenerDelegation: ListenerDelegate {
         return nil
     }
     
-    func didBindServer<Inbound, Outbound>(channel: NIOCore.NIOAsyncChannel<NIOCore.NIOAsyncChannel<Inbound, Outbound>, Never>) async where Inbound : Sendable, Outbound : Sendable {
+    func didBindTCPServer<Inbound: Sendable, Outbound: Sendable>(
+        channel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>
+    ) async {
         serverChannelAny = channel
         if shouldShutdown {
             try! await channel.executeThenClose({ _, _ in })
@@ -46,7 +50,8 @@ final class ListenerDelegation: ListenerDelegate {
 
 // MARK: - Main Test Suite
 
-@Suite struct ConnectionManagerKitTests {
+@Suite(.serialized)
+struct ConnectionManagerKitTests {
     
     // MARK: - Server Tests
     
@@ -74,6 +79,7 @@ final class ListenerDelegation: ListenerDelegate {
         
         try await Task.sleep(until: .now + .milliseconds(100))
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
     }
     
     @Test("Server should resolve address correctly")
@@ -122,7 +128,7 @@ final class ListenerDelegation: ListenerDelegate {
                         channel.pipeline.addHandler(ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216))
                     }
                 
-                return try await bootstrap.connect(host: "localhost", port: 6680)
+                return try await bootstrap.connect(host: "localhost", port: 6680).get()
             }
         }
         
@@ -141,7 +147,7 @@ final class ListenerDelegation: ListenerDelegate {
                     channel.pipeline.addHandler(ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216))
                 }
             
-            return try await bootstrap.connect(host: "localhost", port: 6680)
+            return try await bootstrap.connect(host: "localhost", port: 6680).get()
         }
         
         // Wait a bit for the extra connection attempt
@@ -160,6 +166,7 @@ final class ListenerDelegation: ListenerDelegate {
         extraConnection.cancel()
         serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
     }
 
     @Test("Listener metrics should update on connection accept/close")
@@ -189,7 +196,7 @@ final class ListenerDelegation: ListenerDelegate {
                     channel.pipeline.addHandler(ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216))
                 }
             
-            return try await bootstrap.connect(host: "localhost", port: 6681)
+            return try await bootstrap.connect(host: "localhost", port: 6681).get()
         }
         
         // Wait for connection to be established
@@ -239,7 +246,7 @@ final class ListenerDelegation: ListenerDelegate {
                     channel.pipeline.addHandler(ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216))
                 }
             
-            return try await bootstrap.connect(host: "localhost", port: 6682)
+            return try await bootstrap.connect(host: "localhost", port: 6682).get()
         }
         
         // Wait for connection to be established
@@ -255,7 +262,7 @@ final class ListenerDelegation: ListenerDelegate {
 
         // Cleanup
         clientConnection.cancel()
-        await serverTask.cancel()
+        serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
     }
 
@@ -323,7 +330,9 @@ final class ListenerDelegation: ListenerDelegate {
         try await Task.sleep(until: .now + .milliseconds(500))
         serverTask.cancel()
         connectionTask.cancel()
+        await manager.gracefulShutdown()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
         
         // Verify that connections were attempted
         await #expect(manager.connectionCache.count >= 0)
@@ -486,8 +495,10 @@ final class ListenerDelegation: ListenerDelegate {
         #expect(retrievedHandlers.count >= 0)
         
         // Cleanup
+        await manager.gracefulShutdown()
         serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
     }
     
     @Test("Connection manager should call channelCreated when channels are established")
@@ -544,8 +555,10 @@ final class ListenerDelegation: ListenerDelegate {
         }
         
         // Cleanup
+        await manager.gracefulShutdown()
         serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
     }
     
     @Test("Connection manager should retrieve channel handlers from delegate")
@@ -601,8 +614,10 @@ final class ListenerDelegation: ListenerDelegate {
         }
         
         // Cleanup
+        await manager.gracefulShutdown()
         serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
     }
     
     @Test("Connection manager should handle delegate methods correctly with multiple connections")
@@ -653,7 +668,7 @@ final class ListenerDelegation: ListenerDelegate {
         
         // Verify that all connections were handled
         let channelCreatedEvents = managerDelegate.channelCreatedEvents
-        let deliveredChannels = managerDelegate.deliveredChannels
+//        let deliveredChannels = managerDelegate.deliveredChannels
         
         // Each server should have a channel created event
         for server in servers {
@@ -666,8 +681,10 @@ final class ListenerDelegation: ListenerDelegate {
         #expect(retrievedHandlers.count >= 0)
         
         // Cleanup
+        await manager.gracefulShutdown()
         serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
     }
     
     @Test("Connection manager should work without delegate set")
@@ -713,8 +730,10 @@ final class ListenerDelegation: ListenerDelegate {
         #expect(cachedConnections.count >= 0)
         
         // Cleanup
+        await manager.gracefulShutdown()
         serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
     }
     
     // MARK: - Connection Cache Tests
@@ -930,7 +949,7 @@ final class ListenerDelegation: ListenerDelegate {
     
     @Test("ServerLocation should initialize correctly")
     func testServerLocationInitialization() {
-        let delegate = MockConnectionDelegate(manager: ConnectionManager(), listenerDelegation: ListenerDelegation(shouldShutdown: false))
+        let delegate = MockConnectionDelegate<ByteBuffer, ByteBuffer>(manager: ConnectionManager(), listenerDelegation: ListenerDelegation(shouldShutdown: false))
         let contextDelegate = MockChannelContextDelegate()
         
         let serverLocation = ServerLocation(
@@ -1066,7 +1085,7 @@ final class ListenerDelegation: ListenerDelegate {
         case .fixed(let delay):
             #expect(delay == .seconds(5))
         default:
-            #expect(false, "Expected fixed strategy")
+            #expect(Bool(false), "Expected fixed strategy")
         }
     }
     
@@ -1086,7 +1105,7 @@ final class ListenerDelegation: ListenerDelegate {
             #expect(maxDelay == .seconds(30))
             #expect(jitter == true)
         default:
-            #expect(false, "Expected exponential strategy")
+            #expect(Bool(false), "Expected exponential strategy")
         }
     }
     
@@ -1109,7 +1128,7 @@ final class ListenerDelegation: ListenerDelegate {
             #expect(delay2 == .seconds(4))
             #expect(delay3 == .seconds(0))
         default:
-            #expect(false, "Expected custom strategy")
+            #expect(Bool(false), "Expected custom strategy")
         }
     }
     
@@ -1185,7 +1204,7 @@ final class ListenerDelegation: ListenerDelegate {
         #expect(acquiredConnection != nil)
         
         // Test return operation
-        if let acquiredConnection = acquiredConnection {
+        if acquiredConnection != nil {
             await manager.connectionCache.returnConnection(
                 "acquire-test",
                 poolConfig: poolConfig
@@ -1468,8 +1487,10 @@ final class ListenerDelegation: ListenerDelegate {
         #expect(cachedConnections.count >= 0)
         
         // Cleanup
+        await manager.gracefulShutdown()
         serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
     }
     
     @Test("Connection pooling should work with network events")
@@ -1787,39 +1808,37 @@ final class MockConnectionManagerDelegate: ConnectionManagerDelegate, @unchecked
     }
 }
 
-final class MockConnectionDelegate: ConnectionDelegate {
+final class MockConnectionDelegate<TestInbound: Sendable, TestOutbound: Sendable>: ConnectionDelegate {
 #if canImport(Network)
-    func handleError(_ stream: AsyncStream<NWError>, id: String) {
-        // Mock implementation
-    }
+    func handleError(_ stream: AsyncStream<NWError>, id: String) {}
     
-    func handleNetworkEvents(_ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NetworkEvent>, id: String) async {
-        // Mock implementation
-    }
+    func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>, id: String) async {}
 #else
-    func handleError(_ stream: AsyncStream<IOError>, id: String) {
-        // Mock implementation
-    }
+    func handleError(_ stream: AsyncStream<IOError>, id: String) {}
     
-    func handleNetworkEvents(_ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NIOEvent>, id: String) async {
-        // Mock implementation
-    }
+    func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NIOEvent>, id: String) async {}
 #endif
     
     func initializedChildChannel<Outbound, Inbound>(
         _ context: ConnectionManagerKit.ChannelContext<Inbound, Outbound>
     ) async where Outbound: Sendable, Inbound: Sendable {
-        print("INITIALIZED CHILD CHANNEL")
+        if let serverClientContextDelegate {
+            await listener?.setContextDelegate(serverClientContextDelegate, key: context.id)
+        }
     }
     
     nonisolated(unsafe) var servers = [ServerLocation]()
-    let listenerDelegation: ListenerDelegation
+    let listenerDelegation: (any ListenerDelegate)?
+    let listener: ConnectionListener<TestInbound, TestOutbound>?
+    let serverClientContextDelegate: ChannelContextDelegate?
     nonisolated(unsafe) var networkEventTask: Task<Void, Never>?
     nonisolated(unsafe) var inactiveTask: Task<Void, Never>?
     nonisolated(unsafe) var errorTask: Task<Void, Never>?
-    let manager: ConnectionManager<ByteBuffer, ByteBuffer>
+    let manager: ConnectionManager<TestInbound, TestOutbound>
     
-    init(manager: ConnectionManager<ByteBuffer, ByteBuffer>, listenerDelegation: ListenerDelegation) {
+    init(listener: ConnectionListener<TestInbound, TestOutbound>? = nil, serverClientContextDelegate: ChannelContextDelegate? = nil, manager: ConnectionManager<TestInbound, TestOutbound>, listenerDelegation: (any ListenerDelegate)?) {
+        self.listener = listener
+        self.serverClientContextDelegate = serverClientContextDelegate
         self.manager = manager
         self.listenerDelegation = listenerDelegation
     }
@@ -1831,14 +1850,14 @@ final class MockConnectionDelegate: ConnectionDelegate {
 #if canImport(Network)
     func handleError(_ stream: AsyncStream<NWError>) {
         errorTask = Task {
-            for await error in stream.cancelOnGracefulShutdown() {
-                print("RECEIVED ERROR", error)
+            for await _ in stream.cancelOnGracefulShutdown() {
+                // Handle error silently in tests
             }
         }
     }
     
     func handleNetworkEvents(
-        _ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NetworkEvent>
+        _ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>
     ) {
         networkEventTask = Task {
             for await event in stream.cancelOnGracefulShutdown() {
@@ -1849,10 +1868,7 @@ final class MockConnectionDelegate: ConnectionDelegate {
                     break
                 case .viabilityChanged(let state):
                     if state.isViable, !servers.isEmpty {
-                        var _servers = 0
-                        
                         for server in servers {
-                            _servers += 1
                             let fc1 = await manager.connectionCache.findConnection(
                                 cacheKey: server.cacheKey)
                             await #expect(fc1?.config.host == server.host)
@@ -1867,7 +1883,6 @@ final class MockConnectionDelegate: ConnectionDelegate {
                 case .bindToNWEndpoint(_):
                     break
                 case .waitingForConnectivity(let error):
-                    print("RECEIVED waitingForConnectivity ERROR", error.transientError)
                     switch error.transientError {
                     case .posix(let code):
                         switch code {
@@ -1876,10 +1891,10 @@ final class MockConnectionDelegate: ConnectionDelegate {
                         default:
                             break
                         }
-                    case .dns(let code):
-                        print("RECEIVED DNS CODE", code)
-                    case .tls(let code):
-                        print("RECEIVED TLS CODE", code)
+                    case .dns(_):
+                        break
+                    case .tls(_):
+                        break
                     @unknown default:
                         break
                     }
@@ -1893,8 +1908,8 @@ final class MockConnectionDelegate: ConnectionDelegate {
 #else
     func handleError(_ stream: AsyncStream<IOError>) {
         Task {
-            for await error in stream {
-                print("RECEIVED ERROR", error)
+            for await _ in stream {
+                // Handle error silently in tests
             }
         }
     }
@@ -1903,11 +1918,8 @@ final class MockConnectionDelegate: ConnectionDelegate {
         _ stream: AsyncStream<ConnectionManagerKit.NetworkEventMonitor.NIOEvent>
     ) async {
         Task {
-            for await event in stream.cancelOnGracefulShutdown() {
-                switch event {
-                default:
-                    print("RECEIVED", event)
-                }
+            for await _ in stream.cancelOnGracefulShutdown() {
+                // Handle event silently in tests
             }
         }
     }
@@ -1921,7 +1933,6 @@ final class MockConnectionDelegate: ConnectionDelegate {
                 if !servers.isEmpty {
                     try! await Task.sleep(until: .now + .milliseconds(500))
                     for server in servers {
-                        print(server)
                         let fc1 = await manager.connectionCache.findConnection(
                             cacheKey: server.cacheKey)
                         await #expect(fc1?.config.host == server.host)
@@ -1964,33 +1975,21 @@ final class MockConnectionDelegate: ConnectionDelegate {
 }
 
 final class MockChannelContextDelegate: ChannelContextDelegate {
-    func channelActive(_ stream: AsyncStream<Void>, id: String) {
-        // Mock implementation
-    }
+    func channelActive(_ stream: AsyncStream<Void>, id: String) {}
     
-    func channelInactive(_ stream: AsyncStream<Void>, id: String) {
-        // Mock implementation
-    }
+    func channelInactive(_ stream: AsyncStream<Void>, id: String) {}
     
-    func reportChildChannel(error: any Error, id: String) async {
-        print("MOCK DELEGATION RECEIVE ERROR", error)
-    }
+    func reportChildChannel(error: any Error, id: String) async {}
     
-    func didShutdownChildChannel() async {
-        // Mock implementation
-    }
+    func didShutdownChildChannel() async {}
     
     func deliverWriter<Outbound, Inbound>(
         context: ConnectionManagerKit.WriterContext<Inbound, Outbound>
-    ) async where Outbound: Sendable, Inbound: Sendable {
-        // Mock implementation
-    }
+    ) async where Outbound: Sendable, Inbound: Sendable {}
     
     func deliverInboundBuffer<Inbound, Outbound>(
         context: ConnectionManagerKit.StreamContext<Inbound, Outbound>
-    ) async where Inbound: Sendable, Outbound: Sendable {
-        // Mock implementation
-    }
+    ) async where Inbound: Sendable, Outbound: Sendable {}
 }
 
 final class MockConnectionManagerMetricsDelegate: ConnectionManagerMetricsDelegate, @unchecked Sendable {

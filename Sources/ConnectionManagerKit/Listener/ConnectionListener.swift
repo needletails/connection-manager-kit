@@ -227,9 +227,44 @@ public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceL
             logger: logger,
             delegate: self,
             listenerDelegate: listenerDelegate,
-            serviceListenerDelegate: self
-        )
+            serviceListenerDelegate: self)
         
+        try await runListener(serverService: serverService)
+    }
+    
+    public func listen(
+        address: SocketAddress,
+        websocketConfiguration: WebSocketUpgradeConfig = .init(),
+        configuration: Configuration,
+        delegate: ConnectionDelegate?,
+        listenerDelegate: ListenerDelegate?,
+    ) async throws {
+        self.delegate = delegate
+        self.listenerDelegate = listenerDelegate
+        
+        // Reset metrics on new listen
+        resetMetrics()
+        
+        let serverService = ServerService<Inbound, Outbound>(
+            websocketConfiguration: websocketConfiguration,
+            address: address,
+            configuration: configuration,
+            logger: logger,
+            delegate: self,
+            listenerDelegate: listenerDelegate,
+            serviceListenerDelegate: self)
+        try await runListener(serverService: serverService)
+    }
+    
+    public func unmaskedData(_ frame: WebSocketFrame) -> ByteBuffer {
+        var frameData = frame.data
+        if let maskingKey = frame.maskKey {
+            frameData.webSocketUnmask(maskingKey)
+        }
+        return frameData
+    }
+    
+    private func runListener(serverService: ServerService<Inbound, Outbound>) async throws {
         self.serverService = serverService
         serviceGroup = ServiceGroup(
             services: [serverService],

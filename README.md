@@ -3,7 +3,8 @@
 # ConnectionManagerKit
 
 [![Swift](https://img.shields.io/badge/Swift-6.0-orange.svg)](https://swift.org)
-[![Platform](https://img.shields.io/badge/Platform-iOS%2017%2B%20%7C%20macOS%2014%2B%20%7C%20Linux-blue.svg)](https://developer.apple.com)
+[![Platform](https://img.shields.io/static/v1?label=Platform&message=iOS%2017%2B%20%7C%20macOS%2014%2B%20%7C%20Linux%20%7C%20Android&color=blue&logo=android&logoColor=white
+)](https://developer.apple.com)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 A modern, cross-platform networking framework built on SwiftNIO for managing network connections with automatic reconnection, TLS support, and comprehensive event monitoring.
@@ -12,7 +13,8 @@ A modern, cross-platform networking framework built on SwiftNIO for managing net
 
 ### 🔗 Cross-Platform Networking
 - **Apple Platforms** - iOS 17.0+, macOS 14.0+, tvOS 17.0+, watchOS 10.0+
-- **Linux Support** - Full Linux compatibility with NIO
+- **Android Support** - Android Compatability with NIO
+- **Linux Support** - Linux compatibility with NIO
 - **Swift 6.0+** - Latest Swift language features
 - **Async/Await** - Modern concurrency throughout
 
@@ -211,6 +213,88 @@ class MyChannelContextDelegate: ChannelContextDelegate {
 await manager.gracefulShutdown()
 ```
 
+## 🌐 WebSocket APIs
+
+High-level WebSocket client built on top of `ConnectionManagerKit` with automatic reconnection and main-actor event delivery.
+
+### Quick Start (Client)
+
+```swift
+import ConnectionManagerKit
+
+let client = await WebSocketClient.shared
+
+// Connect by URL (ws / wss)
+let url = URL(string: "wss://example.com/chat")!
+try await client.connect(
+    url: url,
+    headers: ["Authorization": "Bearer <token>"]
+)
+
+// Or connect by parameters
+try await client.connect(
+    host: "example.com",
+    port: 443,
+    enableTLS: true,
+    route: "/chat",
+    headers: ["Sec-WebSocket-Protocol": "chat.v1"],
+    retryStrategy: .exponential(initialDelay: .seconds(1), maxDelay: .seconds(30))
+)
+
+// Send frames
+try await client.sendText("hello", to: "/chat")
+try await client.sendBinary(Data([0x01, 0x02]), to: "/chat")
+
+// Receive messages (main-actor observable stream)
+if let messages = await client.socketReceiver.messageStream {
+    Task { // observe without blocking
+        for await message in messages {
+            switch message {
+            case .text(let string):
+                print("text: \(string)")
+            case .binary(let data):
+                print("binary bytes: \(data?.count ?? 0)")
+            case .ping: print("ping")
+            case .pong: print("pong")
+            default: break
+            }
+        }
+    }
+}
+
+// Observe channel/network events
+if let events = await client.socketReceiver.eventStream {
+    Task {
+        for await event in events {
+            switch event {
+            case .channelActive: print("connected")
+            case .channelInactive: print("disconnected")
+            case .error(let error): print("ws error: \(error)")
+            default: break
+            }
+        }
+    }
+}
+
+// Disconnect a route or shut down all
+await client.disconnect("/chat")
+await client.shutDown()
+```
+
+### Headers and TLS
+
+- Pass additional HTTP headers via the `headers` parameter on `connect(...)` (e.g., `Authorization`, `Sec-WebSocket-Protocol`).
+- Use `wss://` or set `enableTLS: true` to enable TLS. For advanced TLS, provide `tlsPreKeyed`.
+
+### Heartbeats (Auto Ping/Pong)
+
+- Enabled by default. Configure with:
+  - `autoPingPong: Bool` (default true)
+  - `autoPingPongInterval: TimeInterval?` (default 60s)
+  - `autoPingTimeout: TimeInterval` (default 10s) – disconnects the route if a `pong` is not received in time.
+
+See the full WebSocket quick start: [WebSocket Quick Start](Sources/ConnectionManagerKit/Documentation.docc/WebSocketQuickStart.md)
+
 ## 📚 Documentation
 
 Comprehensive documentation is available in the [Documentation.docc](Sources/ConnectionManagerKit/Documentation.docc) directory:
@@ -218,6 +302,7 @@ Comprehensive documentation is available in the [Documentation.docc](Sources/Con
 - **[Getting Started](Sources/ConnectionManagerKit/Documentation.docc/GettingStarted.md)** - Quick setup guide
 - **[Basic Usage](Sources/ConnectionManagerKit/Documentation.docc/BasicUsage.md)** - Common usage patterns
 - **[API Reference](Sources/ConnectionManagerKit/Documentation.docc/Documentation.md)** - Complete API documentation
+- **[WebSocket Quick Start](Sources/ConnectionManagerKit/Documentation.docc/WebSocketQuickStart.md)** - `WebSocketClient` usage and events
 
 ### Building Documentation
 

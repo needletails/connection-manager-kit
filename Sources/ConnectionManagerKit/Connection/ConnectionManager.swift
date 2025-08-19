@@ -5,6 +5,8 @@ import NIOCore
 import NIOExtras
 import NIOPosix
 import NIOSSL
+import NIOHTTP1
+import NIOWebSocket
 import ServiceLifecycle
 import NeedleTailLogger
 import Metrics
@@ -101,9 +103,9 @@ public struct TLSPreKeyedConfiguration: Sendable {
 ///     func retrieveChannelHandlers() -> [ChannelHandler] {
 ///         return [MyCustomHandler()]
 ///     }
-///     
-///     func deliverChannel(_ channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>, 
-///                        manager: ConnectionManager<ByteBuffer, ByteBuffer>, 
+///
+///     func deliverChannel(_ channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>,
+///                        manager: ConnectionManager<ByteBuffer, ByteBuffer>,
 ///                        cacheKey: String) async {
 ///         await manager.setDelegates(
 ///             connectionDelegate: self,
@@ -141,7 +143,7 @@ public protocol ConnectionManagerDelegate: AnyObject, Sendable {
     /// - Note: This method is asynchronous and should be awaited.
     @available(*, deprecated, message: "This method is deprecated and will be removed in a future version. Use channelCreated(_:cacheKey:) instead.")
     func deliverChannel(_ channel: NIOAsyncChannel<Inbound, Outbound>, manager: ConnectionManager<Inbound, Outbound>, cacheKey: String) async
-
+    
     /// Called when a channel is created.
     ///
     /// This method is called when a channel is created. It is used to notify the delegate that a channel has been created.
@@ -183,7 +185,7 @@ public enum RetryStrategy: Sendable {
 /// ```swift
 /// let manager = ConnectionManager<ByteBuffer, ByteBuffer>(logger: NeedleTailLogger())
 /// manager.delegate = MyConnectionManagerDelegate()
-/// 
+///
 /// let servers = [
 ///     ServerLocation(
 ///         host: "api.example.com",
@@ -194,14 +196,14 @@ public enum RetryStrategy: Sendable {
 ///         contextDelegate: contextDelegate
 ///     )
 /// ]
-/// 
+///
 /// try await manager.connect(
 ///     to: servers,
 ///     maxReconnectionAttempts: 5,
 ///     timeout: .seconds(10),
 ///     retryStrategy: .exponential(initialDelay: .seconds(1), maxDelay: .seconds(30))
 /// )
-/// 
+///
 /// // Later, when shutting down
 /// await manager.gracefulShutdown()
 /// ```
@@ -219,6 +221,11 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     
     /// The service group for managing connection lifecycle.
     private var serviceGroup: ServiceGroup?
+    /// Background task that runs the service lifecycle without blocking connect calls.
+    private var serviceLifecycleTask: Task<Void, Never>?
+    /// Optional WebSocket configuration applied to all connections created by this manager.
+    public nonisolated(unsafe) var webSocketOptions: WebSocketOptions?
+    private nonisolated(unsafe) var enabledWebsocket: Bool = false
     
     /// The logger instance for this connection manager.
     private let logger: NeedleTailLogger
@@ -360,7 +367,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     }
     
     /// Sets the delegate with proper type safety.
-    /// 
+    ///
     /// This method ensures that the delegate has matching generic types.
     /// - Parameter delegate: The delegate to set, must have matching Inbound and Outbound types.
     public func setDelegate<D: ConnectionManagerDelegate>(_ delegate: D) where D.Inbound == Inbound, D.Outbound == Outbound {
@@ -388,7 +395,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     
     /// Initializes a new `ConnectionManager` instance.
     ///
-    /// - Parameter logger: The logger instance to use for logging connection events. 
+    /// - Parameter logger: The logger instance to use for logging connection events.
     ///   Defaults to a new `NeedleTailLogger` instance.
     ///
     /// ## Example
@@ -398,11 +405,11 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     public init(logger: NeedleTailLogger = NeedleTailLogger()) {
         self.logger = logger
         self.connectionCache = ConnectionCache<Inbound, Outbound>(logger: logger)
-        #if canImport(Network)
+#if canImport(Network)
         self.group = NIOTSEventLoopGroup.singleton
-        #else
+#else
         self.group = MultiThreadedEventLoopGroup.singleton
-        #endif
+#endif
         
         // Set up callback to update metrics when connections are removed from cache
         Task {
@@ -434,7 +441,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     ///     ServerLocation(host: "server1.example.com", port: 443, enableTLS: true, cacheKey: "server1"),
     ///     ServerLocation(host: "server2.example.com", port: 8080, enableTLS: false, cacheKey: "server2")
     /// ]
-    /// 
+    ///
     /// try await manager.connect(
     ///     to: servers,
     ///     maxReconnectionAttempts: 5,
@@ -459,7 +466,19 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                 retryStrategy: retryStrategy)
         }
         
-        // Connections are managed individually through the connection cache
+        if serviceGroup == nil {
+            serviceGroup = await ServiceGroup(
+                services: connectionCache.fetchAllConnections(),
+                logger: .init(label: "Connection Manager"))
+            let group = serviceGroup
+            serviceLifecycleTask = Task {
+                do {
+                    try await group?.run()
+                } catch {
+                    // Intentionally ignore; shutdown is coordinated via gracefulShutdown
+                }
+            }
+        }
     }
     
     /// Sets the delegates for connection and context handling.
@@ -518,7 +537,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     ///     ServerLocation(host: "server1.example.com", port: 443, enableTLS: true, cacheKey: "server1"),
     ///     ServerLocation(host: "server2.example.com", port: 8080, enableTLS: false, cacheKey: "server2")
     /// ]
-    /// 
+    ///
     /// try await manager.connect(
     ///     to: servers,
     ///     maxReconnectionAttempts: 5,
@@ -543,7 +562,19 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                 retryStrategy: retryStrategy)
         }
         
-        // Connections are managed individually through the connection cache
+        if serviceGroup == nil {
+            serviceGroup = await ServiceGroup(
+                services: connectionCache.fetchAllConnections(),
+                logger: .init(label: "Connection Manager"))
+            let group = serviceGroup
+            serviceLifecycleTask = Task {
+                do {
+                    try await group?.run()
+                } catch {
+                    // Intentionally ignore; shutdown is coordinated via gracefulShutdown
+                }
+            }
+        }
     }
     
     /// Attempts to connect to a specified server with retry logic.
@@ -589,9 +620,9 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                     config: server,
                     childChannel: childChannel,
                     delegate: self), for: server.cacheKey)
-
+            
             await delegate?.channelCreated(childChannel.channel.eventLoop, cacheKey: server.cacheKey)
-
+            
             let monitor = try await childChannel.channel.pipeline.handler(type: NetworkEventMonitor.self).get()
             if let foundConnection = await connectionCache.findConnection(cacheKey: server.cacheKey) {
                 await delegateMonitorEvents(monitor: monitor, server: foundConnection.config)
@@ -620,6 +651,21 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                     timeout: timeout,
                     tlsPreKeyed: tlsPreKeyed,
                     retryStrategy: retryStrategy)
+                
+                if serviceGroup == nil {
+                    serviceGroup = await ServiceGroup(
+                        services: connectionCache.fetchAllConnections(),
+                        logger: .init(label: "Connection Manager"))
+                    let group = serviceGroup
+                    serviceLifecycleTask = Task {
+                        do {
+                            try await group?.run()
+                        } catch {
+                            // Intentionally ignore; shutdown is coordinated via gracefulShutdown
+                        }
+                    }
+                }
+                
             } else {
                 _shouldReconnect = false
                 // If max attempts reached, rethrow the error
@@ -660,7 +706,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     /// Errors that can occur within the `ConnectionManager`.
     enum Errors: Error {
         /// Indicates that TLS configuration is required but not provided.
-        case tlsNotConfigured
+        case tlsNotConfigured, websocketUpgradeFailed
     }
     
     /// Creates a connection to the specified server.
@@ -683,7 +729,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         tlsPreKeyed: TLSPreKeyedConfiguration? = nil
     ) async throws -> NIOAsyncChannel<Inbound, Outbound> {
         
-        #if !canImport(Network)
+#if !canImport(Network)
         func socketChannelCreator(tlsPreKeyed: TLSPreKeyedConfiguration? = nil) async throws -> NIOAsyncChannel<Inbound, Outbound> {
             var tlsConfiguration = tlsPreKeyed?.tlsConfiguration
             if tlsPreKeyed == nil {
@@ -707,18 +753,32 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                 bootstrap.enableTLS()
             }
             
-            return try await client
-                .connectTimeout(timeout)
-                .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
-                .connect(
+            if enabledWebsocket {
+                let upgradeResult: EventLoopFuture<UpgradeResult> = try await client.connect(
                     host: server.host,
                     port: server.port) { channel in
-                        return createHandlers(channel, server: server)
+                        upgradeSocket(channel, server: server)
                     }
+                switch try await upgradeResult.get() {
+                case .websocket(let websocketChannel):
+                    return websocketChannel as! NIOAsyncChannel<Inbound, Outbound>
+                case .notUpgraded:
+                    throw Errors.websocketUpgradeFailed
+                }
+            } else {
+                return try await client
+                    .connectTimeout(timeout)
+                    .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
+                    .connect(
+                        host: server.host,
+                        port: server.port) { channel in
+                            return createHandlers(channel, server: server)
+                        }
+            }
         }
-        #endif
+#endif
         
-        #if canImport(Network)
+#if canImport(Network)
         var connection = NIOTSConnectionBootstrap(group: group)
         let tcpOptions = NWProtocolTCP.Options()
         connection = connection.tcpOptions(tcpOptions)
@@ -745,14 +805,92 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
             .connectTimeout(timeout)
             .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
         
-        return try await connection.connect(
-            host: server.host,
-            port: server.port) { channel in
-                return createHandlers(channel, server: server)
+        if enabledWebsocket {
+            let upgradeResult: EventLoopFuture<UpgradeResult> = try await connection.connect(
+                host: server.host,
+                port: server.port) { channel in
+                    upgradeSocket(channel, server: server)
+                }
+            switch try await upgradeResult.get() {
+            case .websocket(let websocketChannel):
+                return websocketChannel as! NIOAsyncChannel<Inbound, Outbound>
+            case .notUpgraded:
+                throw Errors.websocketUpgradeFailed
             }
-        #else
+        } else {
+            return try await connection.connect(
+                host: server.host,
+                port: server.port) { channel in
+                    return createHandlers(channel, server: server)
+                }
+        }
+#else
         return try await socketChannelCreator()
-        #endif
+#endif
+        
+        @Sendable func upgradeSocket(_ channel: Channel, server: ServerLocation
+        ) -> EventLoopFuture<EventLoopFuture<ConnectionManager<Inbound, Outbound>.UpgradeResult>> {
+            let monitor = NetworkEventMonitor(connectionIdentifier: server.cacheKey)
+            return channel.eventLoop.makeCompletedFuture {
+                try channel.pipeline.syncOperations.addHandler(monitor)
+                if webSocketOptions == nil {
+                    webSocketOptions = WebSocketOptions()
+                }
+                guard let webSocketOptions else {
+                    throw Errors.websocketUpgradeFailed
+                }
+                
+                
+                let upgrader = NIOTypedWebSocketClientUpgrader<UpgradeResult>(
+                    maxFrameSize: webSocketOptions.maxFrameSize,
+                    enableAutomaticErrorHandling: true,
+                    upgradePipelineHandler: { (channel, _) in
+                        channel.eventLoop.makeCompletedFuture {
+                            try channel.pipeline.syncOperations.addHandler(NIOWebSocketFrameAggregator(
+                                minNonFinalFragmentSize: webSocketOptions.minNonFinalFragmentSize,
+                                maxAccumulatedFrameCount: webSocketOptions.maxAccumulatedFrameCount,
+                                maxAccumulatedFrameSize: webSocketOptions.maxAccumulatedFrameSize
+                            ))
+                            let asyncChannel = try NIOAsyncChannel<WebSocketFrame, WebSocketFrame>(wrappingChannelSynchronously: channel)
+                            return .websocket(asyncChannel)
+                        }
+                    }
+                )
+                
+                var headers = HTTPHeaders()
+                let needsPort = !(server.port == 80 || server.port == 443)
+                headers.add(name: "Host", value: needsPort ? "\(server.host):\(server.port)" : server.host)
+                
+                for (name, value) in webSocketOptions.headers {
+                    headers.add(name: name, value: value)
+                }
+                if let subs = webSocketOptions.subprotocols, !subs.isEmpty {
+                    headers.add(name: "Sec-WebSocket-Protocol", value: subs.joined(separator: ", "))
+                }
+                
+                let requestHead = HTTPRequestHead(
+                    version: .http1_1,
+                    method: .GET,
+                    uri: webSocketOptions.uri,
+                    headers: headers
+                )
+                
+                let clientUpgradeConfiguration = NIOTypedHTTPClientUpgradeConfiguration(
+                    upgradeRequestHead: requestHead,
+                    upgraders: [upgrader],
+                    notUpgradingCompletionHandler: { channel in
+                        channel.eventLoop.makeCompletedFuture {
+                            UpgradeResult.notUpgraded
+                        }
+                    }
+                )
+                
+                let negotiationResultFuture = try channel.pipeline.syncOperations.configureUpgradableHTTPClientPipeline(
+                    configuration: .init(
+                        upgradeConfiguration: clientUpgradeConfiguration))
+                return negotiationResultFuture
+            }
+        }
         
         /// Creates handlers for the channel and adds them to the pipeline.
         ///
@@ -761,19 +899,54 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         ///   - server: The `ServerLocation` associated with the channel.
         /// - Returns: An `EventLoopFuture` containing the `NIOAsyncChannel`.
         @Sendable func createHandlers(_ channel: Channel, server: ServerLocation) -> EventLoopFuture<NIOAsyncChannel<Inbound, Outbound>> {
-            
             let monitor = NetworkEventMonitor(connectionIdentifier: server.cacheKey)
-            
             return channel.eventLoop.makeCompletedFuture {
                 try channel.pipeline.syncOperations.addHandler(monitor)
                 if let channelHandlers = delegate?.retrieveChannelHandlers(), !channelHandlers.isEmpty {
                     try channel.pipeline.syncOperations.addHandlers(channelHandlers)
                 }
-                
                 return try NIOAsyncChannel<Inbound, Outbound>(
                     wrappingChannelSynchronously: channel)
             }
         }
+    }
+    
+    public func connectWebSocket(
+        to servers: [ServerLocation],
+        maxReconnectionAttempts: Int = 6,
+        timeout: TimeAmount = .seconds(10),
+        tlsPreKeyed: TLSPreKeyedConfiguration? = nil,
+        retryStrategy: RetryStrategy = .fixed(delay: .seconds(5))
+    ) async throws {
+        enabledWebsocket = true
+        for await server in servers.async {
+            try await attemptConnection(
+                to: server,
+                currentAttempt: 0,
+                maxAttempts: maxReconnectionAttempts,
+                timeout: timeout,
+                tlsPreKeyed: tlsPreKeyed,
+                retryStrategy: retryStrategy)
+        }
+        
+        if serviceGroup == nil {
+            serviceGroup = await ServiceGroup(
+                services: connectionCache.fetchAllConnections(),
+                logger: .init(label: "Connection Manager"))
+            let group = serviceGroup
+            serviceLifecycleTask = Task {
+                do {
+                    try await group?.run()
+                } catch {
+                    // Intentionally ignore; shutdown is coordinated via gracefulShutdown
+                }
+            }
+        }
+    }
+    
+    enum UpgradeResult {
+        case websocket(NIOAsyncChannel<WebSocketFrame, WebSocketFrame>)
+        case notUpgraded
     }
     
     /// Monitors events from the `NetworkEventMonitor` and delegates them to the appropriate server delegates.
@@ -795,7 +968,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
             server.contextDelegate?.channelInactive(channelInactiveStream, id: monitor.connectionIdentifier)
         }
     }
-
+    
     /// Gracefully shuts down the connection manager and cleans up resources.
     ///
     /// This method triggers a graceful shutdown of the service group and removes all connections from the cache.
@@ -817,10 +990,13 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
             logger.log(level: .error, message: "Error shutting down connection group: \(error)")
             await serviceGroup?.triggerGracefulShutdown()
         }
+        let task = serviceLifecycleTask
+        serviceLifecycleTask = nil
+        await task?.value
         serviceGroup = nil
         _shouldReconnect = false
     }
-
+    
     /// Connects to a list of server locations with parallel processing.
     ///
     /// This method attempts to establish connections to all provided servers in parallel,
@@ -843,7 +1019,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     ///     ServerLocation(host: "server2.example.com", port: 8080, enableTLS: false, cacheKey: "server2"),
     ///     ServerLocation(host: "server3.example.com", port: 443, enableTLS: true, cacheKey: "server3")
     /// ]
-    /// 
+    ///
     /// try await manager.connectParallel(
     ///     to: servers,
     ///     maxReconnectionAttempts: 5,

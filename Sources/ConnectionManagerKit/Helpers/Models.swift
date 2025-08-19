@@ -6,6 +6,7 @@
 //
 import Foundation
 import NIOCore
+import NIOHTTP1
 
 /// A context object that provides access to a channel and its associated metadata.
 ///
@@ -156,6 +157,40 @@ public struct ServerLocation: Sendable {
     }
 }
 
+/// WebSocket client options
+public struct WebSocketOptions: Sendable {
+    
+    public var uri: String
+    public var headers: HTTPHeaders
+    public var subprotocols: [String]?
+    public var maxFrameSize: Int
+    public let minNonFinalFragmentSize: Int
+    public let maxAccumulatedFrameCount: Int
+    public let maxAccumulatedFrameSize: Int
+    public var enableCompression: Bool
+    
+    public init(
+        uri: String = "/",
+        headers: HTTPHeaders = HTTPHeaders(),
+        subprotocols: [String]? = nil,
+        maxFrameSize: Int = 1 << 14,
+        minNonFinalFragmentSize: Int = 0,
+        maxAccumulatedFrameCount: Int = Int.max,
+        maxAccumulatedFrameSize: Int = Int.max,
+        enableCompression: Bool = false,
+    ) {
+        self.uri = uri
+        self.headers = headers
+        self.subprotocols = subprotocols
+        self.maxFrameSize = maxFrameSize
+        self.minNonFinalFragmentSize = minNonFinalFragmentSize
+        self.maxAccumulatedFrameCount = maxAccumulatedFrameCount
+        self.maxAccumulatedFrameSize = maxAccumulatedFrameSize
+        self.enableCompression = enableCompression
+    }
+}
+
+
 /// Configuration for server-side networking setup.
 ///
 /// This struct defines the configuration needed to set up a server that can accept
@@ -217,7 +252,7 @@ public struct Configuration: Sendable {
         group: EventLoopGroup,
         host: String? = nil,
         port: Int = 0,
-        loadBalancedServers: [ServerLocation] = []
+        loadBalancedServers: [ServerLocation] = [],
     ) {
         self.group = group
         self.host = host

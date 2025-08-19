@@ -263,6 +263,7 @@ Task {
 - <doc:ConnectionManager>
 - <doc:ConnectionDelegate>
 - <doc:ChannelContextDelegate>
+- <doc:WebSocketQuickStart>
 
 ### Server-Side
 
