@@ -4,6 +4,14 @@
 //
 //  Created by Cole M on 11/28/24.
 //
+//  Copyright (c) 2025 NeedleTails Organization.
+//
+//  This project is licensed under the MIT License.
+//
+//  See the LICENSE file for more information.
+//
+//  This file is part of the ConnectionManagerKit Project
+
 import Foundation
 import NIOCore
 import NIOPosix
