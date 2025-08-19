@@ -164,8 +164,8 @@ struct ConnectionManagerKitTests {
             connection.cancel()
         }
         extraConnection.cancel()
-        serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        serverTask.cancel()
         try await Task.sleep(for: .milliseconds(150))
     }
 
@@ -215,8 +215,8 @@ struct ConnectionManagerKitTests {
         metrics = await listener.getMetrics()
         #expect(metrics.totalConnectionsClosed >= 0)
 
-        serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        serverTask.cancel()
     }
 
     @Test("Listener should support graceful shutdown")
@@ -262,8 +262,8 @@ struct ConnectionManagerKitTests {
 
         // Cleanup
         clientConnection.cancel()
-        serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        serverTask.cancel()
     }
 
     @Test("Listener should use default and custom configuration")
@@ -496,8 +496,8 @@ struct ConnectionManagerKitTests {
         
         // Cleanup
         await manager.gracefulShutdown()
-        serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        serverTask.cancel()
         try await Task.sleep(for: .milliseconds(150))
     }
     
@@ -556,8 +556,8 @@ struct ConnectionManagerKitTests {
         
         // Cleanup
         await manager.gracefulShutdown()
-        serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        serverTask.cancel()
         try await Task.sleep(for: .milliseconds(150))
     }
     
@@ -615,8 +615,8 @@ struct ConnectionManagerKitTests {
         
         // Cleanup
         await manager.gracefulShutdown()
-        serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        serverTask.cancel()
         try await Task.sleep(for: .milliseconds(150))
     }
     
@@ -682,8 +682,8 @@ struct ConnectionManagerKitTests {
         
         // Cleanup
         await manager.gracefulShutdown()
-        serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        serverTask.cancel()
         try await Task.sleep(for: .milliseconds(150))
     }
     
@@ -731,8 +731,8 @@ struct ConnectionManagerKitTests {
         
         // Cleanup
         await manager.gracefulShutdown()
-        serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        serverTask.cancel()
         try await Task.sleep(for: .milliseconds(150))
     }
     
@@ -1305,11 +1305,12 @@ struct ConnectionManagerKitTests {
         try await Task.sleep(until: .now + .milliseconds(100))
         
         // Then shutdown server
-        serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(until: .now + .milliseconds(100))
+        serverTask.cancel()
         
         // Wait for server shutdown
-        try await Task.sleep(until: .now + .milliseconds(100))
+        try await Task.sleep(until: .now + .milliseconds(500))
     }
     
     @Test("Parallel connection should work with retry strategies")
@@ -1363,11 +1364,12 @@ struct ConnectionManagerKitTests {
         try await Task.sleep(until: .now + .milliseconds(100))
         
         // Then shutdown server
-        serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(until: .now + .milliseconds(100))
+        serverTask.cancel()
         
         // Wait for server shutdown
-        try await Task.sleep(until: .now + .milliseconds(100))
+        try await Task.sleep(until: .now + .milliseconds(500))
     }
     
     @Test("Parallel connection should respect concurrency limits")
@@ -1417,11 +1419,12 @@ struct ConnectionManagerKitTests {
         try await Task.sleep(until: .now + .milliseconds(100))
         
         // Then shutdown server
-        serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(until: .now + .milliseconds(100))
+        serverTask.cancel()
         
         // Wait for server shutdown
-        try await Task.sleep(until: .now + .milliseconds(100))
+        try await Task.sleep(until: .now + .milliseconds(500))
     }
     
     // MARK: - Integration Tests
@@ -1488,8 +1491,8 @@ struct ConnectionManagerKitTests {
         
         // Cleanup
         await manager.gracefulShutdown()
-        serverTask.cancel()
         await listener.serviceGroup?.triggerGracefulShutdown()
+        serverTask.cancel()
         try await Task.sleep(for: .milliseconds(150))
     }
     

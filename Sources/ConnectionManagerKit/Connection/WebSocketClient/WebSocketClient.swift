@@ -447,6 +447,8 @@ public actor WebSocketClient {
             socketReceiver.eventContinuation?.finish()
             socketReceiver.messageContinuation = nil
             socketReceiver.eventContinuation = nil
+            socketReceiver.messageStream = nil
+            socketReceiver.eventStream = nil
         }
     }
     
