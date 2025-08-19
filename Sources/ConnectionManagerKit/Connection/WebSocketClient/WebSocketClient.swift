@@ -8,6 +8,7 @@
 import Foundation
 import Observation
 import NIOFoundationCompat
+import NIOHTTP1
 #if canImport(Network)
 import Network
 #endif
@@ -278,7 +279,14 @@ public actor WebSocketClient {
     @MainActor
     public let socketReceiver: SocketReceiver
     
-    init(socketReceiver: SocketReceiver) {
+    private var autoPingPong = false
+    private var autoPingPongInterval: TimeInterval?
+    private var autoPingTimeout: TimeInterval = 10
+    private var nextPingTasks: [String: Task<Void, Never>] = [:]
+    private var pongTimeoutTasks: [String: Task<Void, Never>] = [:]
+    private var awaitingPongRoutes: Set<String> = []
+    
+    public init(socketReceiver: SocketReceiver) {
         self.socketReceiver = socketReceiver
     }
     
@@ -321,12 +329,15 @@ public actor WebSocketClient {
     ///   - retryStrategy: Retry policy for reconnection attempts.
     public func connect(
         url: URL? = nil,
+        headers: HTTPHeaders = HTTPHeaders(),
         maxReconnectionAttempts: Int = 6,
         timeout: TimeAmount = .seconds(10),
         tlsPreKeyed: TLSPreKeyedConfiguration? = nil,
-        retryStrategy: RetryStrategy = .fixed(delay: .seconds(5))
+        retryStrategy: RetryStrategy = .fixed(delay: .seconds(5)),
+        autoPingPong: Bool = true,
+        autoPingPongInterval: TimeInterval? = 60,
+        autoPingTimeout: TimeInterval = 10
     ) async throws {
-        
         let defaultURL = URL(string: "ws://localhost:8080/")
         
         guard
@@ -350,10 +361,14 @@ public actor WebSocketClient {
             port: port,
             enableTLS: enableTLS,
             route: route,
+            headers: headers,
             maxReconnectionAttempts: maxReconnectionAttempts,
             timeout: timeout,
             tlsPreKeyed: tlsPreKeyed,
-            retryStrategy: retryStrategy)
+            retryStrategy: retryStrategy,
+            autoPingPong: autoPingPong,
+            autoPingPongInterval: autoPingPongInterval,
+            autoPingTimeout: autoPingTimeout)
     }
     
     /// Connect using discrete parameters.
@@ -371,14 +386,21 @@ public actor WebSocketClient {
         port: Int = 8080,
         enableTLS: Bool = false,
         route: String = "/",
+        headers: HTTPHeaders = HTTPHeaders(),
         maxReconnectionAttempts: Int = 6,
         timeout: TimeAmount = .seconds(10),
         tlsPreKeyed: TLSPreKeyedConfiguration? = nil,
-        retryStrategy: RetryStrategy = .fixed(delay: .seconds(5))
+        retryStrategy: RetryStrategy = .fixed(delay: .seconds(5)),
+        autoPingPong: Bool = true,
+        autoPingPongInterval: TimeInterval? = 60,
+        autoPingTimeout: TimeInterval = 10
     ) async throws {
+        self.autoPingPong = autoPingPong
+        self.autoPingPongInterval = autoPingPongInterval
+        self.autoPingTimeout = autoPingTimeout
         if connections[route] != nil { return }
         let manager = ConnectionManager<WebSocketFrame, WebSocketFrame>()
-        manager.webSocketOptions = WebSocketOptions(uri: route)
+        manager.webSocketOptions = WebSocketOptions(uri: route, headers: headers)
         let connectionDelegate = WSConnectionDelegate(socketReceiver: socketReceiver)
         let routeDelegate = RouteContextDelegate(route: route, socket: self)
         let server = ServerLocation(
@@ -399,10 +421,23 @@ public actor WebSocketClient {
             manager: manager,
             contextDelegate: routeDelegate,
             connectionDelegate: connectionDelegate)
+
+        // Start heartbeat: send an initial ping now, then schedule next after pong
+        await startHeartbeatIfNeeded(for: route)
     }
     
     /// Gracefully shutdown all connections and finish streams.
     public func shutDown() async {
+        // Cancel all per-route tasks
+        for pingTask in nextPingTasks.values {
+            pingTask.cancel()
+        }
+        for pingTimeoutTask in pongTimeoutTasks.values {
+            pingTimeoutTask.cancel()
+        }
+        nextPingTasks.removeAll()
+        pongTimeoutTasks.removeAll()
+        awaitingPongRoutes.removeAll()
         for bucket in connections.values {
             await bucket.manager.gracefulShutdown()
         }
@@ -417,13 +452,15 @@ public actor WebSocketClient {
     
     /// Disconnect a specific route, if connected.
     public func disconnect(_ route: String = "/") async {
+        // Cancel per-route heartbeat and timeout
+        await cancelHeartbeat(for: route)
         guard let bucket = connections.removeValue(forKey: route) else { return }
         await bucket.manager.gracefulShutdown()
     }
     
     /// Send a text frame to the specified route.
     public func sendText(_ text: String, to route: String = "/") async throws {
-        let textFrame = WebSocketFrame(fin: true, opcode: .text, data: ByteBuffer(data: text.data(using: .utf8)!))
+        let textFrame = WebSocketFrame(fin: true, opcode: .text, maskKey: maskKey, data: ByteBuffer(data: text.data(using: .utf8)!))
         guard let bucket = connections[route] else { throw Errors.noConnectionForRoute(route) }
         guard let writer = await bucket.contextDelegate.writer else { throw Errors.writerUnavailable(route) }
         try await writer.write(textFrame)
@@ -431,23 +468,35 @@ public actor WebSocketClient {
     
     /// Send a binary frame to the specified route.
     public func sendBinary(_ data: Data, to route: String = "/") async throws {
-        let bianryFrame = WebSocketFrame(fin: true, opcode: .binary, data: ByteBuffer(data: data))
+        let bianryFrame = WebSocketFrame(fin: true, opcode: .binary, maskKey: maskKey, data: ByteBuffer(data: data))
         guard let bucket = connections[route] else { throw Errors.noConnectionForRoute(route) }
         guard let writer = await bucket.contextDelegate.writer else { throw Errors.writerUnavailable(route) }
         try await writer.write(bianryFrame)
     }
     
     /// Send a ping frame to the specified route.
-    public func sendPing(_ data: Data, to route: String = "/") async throws {
-        let pingFrame = WebSocketFrame(fin: true, opcode: .ping, data: ByteBuffer(data: data))
+    public func sendPing(_ data: any DataProtocol, to route: String = "/") async throws {
+        var buffer = ByteBuffer()
+        if let byteBufferView = data as? ByteBufferView {
+            buffer = ByteBuffer(byteBufferView)
+        } else if let data = data as? Data {
+            buffer = ByteBuffer(data: data)
+        }
+        let pingFrame = WebSocketFrame(fin: true, opcode: .ping, maskKey: maskKey, data: buffer)
         guard let bucket = connections[route] else { throw Errors.noConnectionForRoute(route) }
         guard let writer = await bucket.contextDelegate.writer else { throw Errors.writerUnavailable(route) }
         try await writer.write(pingFrame)
     }
     
     /// Send a pong frame to the specified route.
-    public func sendPong(_ data: Data, to route: String = "/") async throws {
-        let pongFrame = WebSocketFrame(fin: true, opcode: .pong, data: ByteBuffer(data: data))
+    public func sendPong(_ data: any DataProtocol, to route: String = "/") async throws {
+        var buffer = ByteBuffer()
+        if let byteBufferView = data as? ByteBufferView {
+            buffer = ByteBuffer(byteBufferView)
+        } else if let data = data as? Data {
+            buffer = ByteBuffer(data: data)
+        }
+        let pongFrame = WebSocketFrame(fin: true, opcode: .pong, maskKey: maskKey, data: buffer)
         guard let bucket = connections[route] else { throw Errors.noConnectionForRoute(route) }
         guard let writer = await bucket.contextDelegate.writer else { throw Errors.writerUnavailable(route) }
         try await writer.write(pongFrame)
@@ -462,16 +511,30 @@ public actor WebSocketClient {
                 self.socketReceiver.setInboundMessage(.binary(data))
             }
         case .ping:
-            let data = frame.data.getData(at: 0, length: frame.data.readableBytes) ?? Data()
+            let payload = frame.data.getData(at: 0, length: frame.data.readableBytes) ?? Data()
+            // Immediate pong per spec
+            if autoPingPong {
+                do {
+                    try await sendPong(payload, to: route)
+                } catch {
+                    
+                }
+            }
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                self.socketReceiver.setInboundMessage(.ping(data))
+                self.socketReceiver.setInboundMessage(.ping(payload))
             }
         case .pong:
-            let data = frame.data.getData(at: 0, length: frame.data.readableBytes) ?? Data()
+            let payload = frame.data.getData(at: 0, length: frame.data.readableBytes) ?? Data()
+            // Mark pong received and schedule next ping after interval
+            awaitingPongRoutes.remove(route)
+            if let t = pongTimeoutTasks.removeValue(forKey: route) { t.cancel() }
+            if autoPingPong {
+                await scheduleNextPingAfterInterval(for: route)
+            }
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                self.socketReceiver.setInboundMessage(.pong(data))
+                self.socketReceiver.setInboundMessage(.pong(payload))
             }
         case .text:
             let text = frame.data.getString(at: 0, length: frame.data.readableBytes) ?? ""
@@ -492,6 +555,11 @@ public actor WebSocketClient {
         default:
             break
         }
+    }
+    
+    private var maskKey: WebSocketMaskingKey {
+        var generator = SystemRandomNumberGenerator()
+        return WebSocketMaskingKey.random(using: &generator)
     }
 }
 
@@ -561,5 +629,85 @@ actor RouteContextDelegate: ChannelContextDelegate {
         await MainActor.run {
             socket.socketReceiver.setError(error)
         }
+    }
+}
+
+// MARK: - Heartbeat Management
+extension WebSocketClient {
+    private func startHeartbeatIfNeeded(for route: String) async {
+        guard autoPingPong, let interval = autoPingPongInterval else { return }
+        // If a next-ping task already exists, keep it
+        if nextPingTasks[route] != nil { return }
+        // Send an initial ping now and arm timeout
+        await sendPingAndArmTimeout(for: route)
+        // Schedule the next ping after we receive a pong (handled in .pong)
+        // Additionally, set up a safety scheduler to ensure pings continue if stream of pongs stalls
+        // This scheduler just ensures there's always a future ping planned; it is cancelled/rescheduled on pong
+        let t = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                // If awaiting a pong, let timeout handle it; otherwise ensure a ping will be sent later
+                if await !self.awaitingPongRoutes.contains(route) {
+                    do {
+                        try await Task.sleep(until: .now + .seconds(interval))
+                    } catch { break }
+                    await self.sendPingAndArmTimeout(for: route)
+                } else {
+                    // Brief backoff to avoid tight loop
+                    try? await Task.sleep(for: .seconds(1))
+                }
+                if await self.connections[route] == nil { break }
+            }
+        }
+        nextPingTasks[route] = t
+    }
+    
+    private func scheduleNextPingAfterInterval(for route: String) async {
+        guard autoPingPong, let interval = autoPingPongInterval else { return }
+        // Cancel any existing scheduled next ping; reschedule for interval from now
+        if let t = nextPingTasks.removeValue(forKey: route) { t.cancel() }
+        let t = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(until: .now + .seconds(interval))
+            } catch { return }
+            await self.sendPingAndArmTimeout(for: route)
+            // After sending, keep the scheduler alive for subsequent cycles
+            await self.startHeartbeatIfNeeded(for: route)
+        }
+        nextPingTasks[route] = t
+    }
+    
+    private func cancelHeartbeat(for route: String) async {
+        if let t = nextPingTasks.removeValue(forKey: route) { t.cancel() }
+        if let t = pongTimeoutTasks.removeValue(forKey: route) { t.cancel() }
+        awaitingPongRoutes.remove(route)
+    }
+    
+    private func sendPingAndArmTimeout(for route: String) async {
+        // If disconnected, skip
+        guard connections[route] != nil else { return }
+        // Send ping with empty payload
+        do { try await sendPing(Data(), to: route) } catch { return }
+        awaitingPongRoutes.insert(route)
+        // Cancel any existing timeout and arm a new one
+        if let t = pongTimeoutTasks.removeValue(forKey: route) { t.cancel() }
+        let watchdog = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(until: .now + .seconds(self.autoPingTimeout))
+            } catch { return }
+            // If still awaiting, consider the route dead and disconnect
+            if await self.awaitingPongRoutes.contains(route) {
+                await removeRoute(route: route)
+                await self.cancelHeartbeat(for: route)
+                await self.disconnect(route)
+            }
+        }
+        pongTimeoutTasks[route] = watchdog
+    }
+    
+    private func removeRoute(route: String) async {
+        self.awaitingPongRoutes.remove(route)
     }
 }

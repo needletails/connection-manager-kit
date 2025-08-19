@@ -41,7 +41,70 @@ public struct WebSocketUpgradeConfig: Sendable {
     }
 }
 
-actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
+public protocol WebSocketUpgrader: Sendable {
+    associatedtype Inbound: Sendable
+    associatedtype Outbound: Sendable
+    
+    func upgradeWebSocket(channel: Channel, configuration: WebSocketUpgradeConfig?) -> EventLoopFuture<EventLoopFuture<NIOAsyncChannel<Inbound, Outbound>>>
+}
+
+extension WebSocketUpgrader {
+        
+    public func upgradeWebSocket(channel: Channel, configuration: WebSocketUpgradeConfig?) -> EventLoopFuture<EventLoopFuture<NIOAsyncChannel<Inbound, Outbound>>> {
+            return channel.eventLoop.makeCompletedFuture {
+                
+                guard let configuration else {
+                    throw ServerServiceErrors.websocketUpgradeFailed
+                }
+                let upgrader = NIOTypedWebSocketServerUpgrader<NIOAsyncChannel<Inbound, Outbound>>(
+                    maxFrameSize: configuration.maxFrameSize,
+                    shouldUpgrade: { channel, head in
+                        channel.eventLoop.makeSucceededFuture(configuration.customHeaders)
+                    },
+                    upgradePipelineHandler: { channel, handler in
+                        channel.eventLoop.makeCompletedFuture {
+                            try channel.pipeline.syncOperations.addHandler(
+                                NIOWebSocketFrameAggregator(
+                                    minNonFinalFragmentSize: configuration.minNonFinalFragmentSize,
+                                    maxAccumulatedFrameCount: configuration.maxAccumulatedFrameCount,
+                                    maxAccumulatedFrameSize: configuration.maxAccumulatedFrameSize))
+                            
+                            let asyncChannel = try NIOAsyncChannel<Inbound, Outbound>(
+                                wrappingChannelSynchronously: channel,
+                                configuration: .init(isOutboundHalfClosureEnabled: true)
+                            )
+                            return asyncChannel
+                        }
+                    }
+                )
+                
+                let serverUpgradeConfiguration = NIOTypedHTTPServerUpgradeConfiguration(
+                    upgraders: [upgrader],
+                    notUpgradingCompletionHandler: { channel in
+                        return channel.eventLoop.makeCompletedFuture {
+                            return try NIOAsyncChannel<Inbound, Outbound>(
+                                wrappingChannelSynchronously: channel)
+                        }
+                    })
+                
+                var upgradeConfiguration = NIOUpgradableHTTPServerPipelineConfiguration<NIOAsyncChannel<Inbound, Outbound>>(upgradeConfiguration: serverUpgradeConfiguration)
+                upgradeConfiguration.enablePipelining = false
+                upgradeConfiguration.enableResponseHeaderValidation = false
+                
+                let negotiationResultFuture = try channel.pipeline.syncOperations.configureUpgradableHTTPServerPipeline(
+                    configuration: upgradeConfiguration
+                )
+                return negotiationResultFuture
+            }
+        }
+}
+
+enum ServerServiceErrors: Error {
+    case tlsNotConfigured, websocketUpgradeFailed
+}
+
+
+actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUpgrader {
     
     private let address: SocketAddress
     private let configuration: Configuration
@@ -148,70 +211,8 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
             throw error
         }
     }
-    
-    enum Errors: Error {
-        case tlsNotConfigured, websocketUpgradeFailed
-    }
 
     private func createWebSocketChannel() async throws -> NIOAsyncChannel<EventLoopFuture<NIOAsyncChannel<Inbound, Outbound>>, Never> {
-        
-        @Sendable
-        func handleWebSocketUpgrade(channel: Channel, request: HTTPRequestHead) -> EventLoopFuture<HTTPHeaders?> {
-            guard let headers = websocketConfiguration?.customHeaders else {
-                return channel.eventLoop.makeFailedFuture(Errors.websocketUpgradeFailed)
-            }
-            return channel.eventLoop.makeSucceededFuture(headers)
-        }
-        
-        @Sendable
-        func upgradeWebSocket(channel: Channel) -> EventLoopFuture<EventLoopFuture<NIOAsyncChannel<Inbound, Outbound>>> {
-            return channel.eventLoop.makeCompletedFuture {
-                
-                guard let configuration = websocketConfiguration else {
-                    throw Errors.websocketUpgradeFailed
-                }
-                let upgrader = NIOTypedWebSocketServerUpgrader<NIOAsyncChannel<Inbound, Outbound>>(
-                    maxFrameSize: configuration.maxFrameSize,
-                    shouldUpgrade: { channel, head in
-                        return handleWebSocketUpgrade(channel: channel, request: head)
-                    },
-                    upgradePipelineHandler: { channel, handler in
-                        channel.eventLoop.makeCompletedFuture {
-                            try channel.pipeline.syncOperations.addHandler(
-                                NIOWebSocketFrameAggregator(
-                                    minNonFinalFragmentSize: configuration.minNonFinalFragmentSize,
-                                    maxAccumulatedFrameCount: configuration.maxAccumulatedFrameCount,
-                                    maxAccumulatedFrameSize: configuration.maxAccumulatedFrameSize))
-                            
-                            let asyncChannel = try NIOAsyncChannel<Inbound, Outbound>(
-                                wrappingChannelSynchronously: channel,
-                                configuration: .init(isOutboundHalfClosureEnabled: true)
-                            )
-                            return asyncChannel
-                        }
-                    }
-                )
-                
-                let serverUpgradeConfiguration = NIOTypedHTTPServerUpgradeConfiguration(
-                    upgraders: [upgrader],
-                    notUpgradingCompletionHandler: { channel in
-                        return channel.eventLoop.makeCompletedFuture {
-                            return try NIOAsyncChannel<Inbound, Outbound>(
-                                wrappingChannelSynchronously: channel)
-                        }
-                    })
-                
-                var upgradeConfiguration = NIOUpgradableHTTPServerPipelineConfiguration<NIOAsyncChannel<Inbound, Outbound>>(upgradeConfiguration: serverUpgradeConfiguration)
-                upgradeConfiguration.enablePipelining = false
-                upgradeConfiguration.enableResponseHeaderValidation = false
-                
-                let negotiationResultFuture = try channel.pipeline.syncOperations.configureUpgradableHTTPServerPipeline(
-                    configuration: upgradeConfiguration
-                )
-                return negotiationResultFuture
-            }
-        }
-
         return try await ServerBootstrap(group: configuration.group)
         // Optimized server channel options
             .serverChannelOption(ChannelOptions.backlog, value: Int32(configuration.backlog))
@@ -221,8 +222,11 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service {
             .childChannelOption(ChannelOptions.socketOption(.so_keepalive), value: 1)
             .childChannelOption(ChannelOptions.recvAllocator, value: AdaptiveRecvByteBufferAllocator())
             .childChannelOption(ChannelOptions.autoRead, value: true)
-            .bind(to: address, childChannelInitializer: { channel in
-                    return upgradeWebSocket(channel: channel)
+            .bind(to: address, childChannelInitializer: { [weak self] channel in
+                guard let self else {
+                    return channel.eventLoop.makeFailedFuture(ServerServiceErrors.websocketUpgradeFailed)
+                }
+                    return upgradeWebSocket(channel: channel, configuration: websocketConfiguration)
             })
         
     }

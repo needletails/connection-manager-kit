@@ -572,7 +572,8 @@ struct WebSocketTests {
             for await frame in serverChannelCompletionStream {
                 if frame.opcode == .text {
                     // Echo back the text frame
-                    let echoFrame = WebSocketFrame(fin: true, opcode: .text, data: frame.data)
+                    let unmasked = await listener.unmaskedData(frame)
+                    let echoFrame = WebSocketFrame(fin: true, opcode: .text, data: ByteBuffer(buffer: unmasked))
                     try await serverClientDelegate.writer?.write(echoFrame)
                 }
             }
@@ -654,7 +655,8 @@ struct WebSocketTests {
             for await frame in serverChannelCompletionStream {
                 if frame.opcode == .binary {
                     // Echo back the binary frame
-                    let echoFrame = WebSocketFrame(fin: true, opcode: .binary, data: frame.data)
+                    let unmasked = await listener.unmaskedData(frame)
+                    let echoFrame = WebSocketFrame(fin: true, opcode: .binary, data: ByteBuffer(buffer: unmasked))
                     try await serverClientDelegate.writer?.write(echoFrame)
                 }
             }
@@ -665,14 +667,13 @@ struct WebSocketTests {
         // Test WebSocket class using singleton
         let webSocket = await WebSocketClient.shared
         try await webSocket.connect(host: "localhost", port: port, enableTLS: false, route: "/binary")
+        try await Task.sleep(for: .seconds(2))
         
         // Wait until channel is active to avoid race conditions
         if let eventStream = await webSocket.socketReceiver.eventStream {
             for try await event in eventStream {
                 if case .channelActive = event { break }
             }
-        } else {
-            try await Task.sleep(for: .seconds(1))
         }
         
         // Send binary message
@@ -736,7 +737,8 @@ struct WebSocketTests {
             for await frame in serverChannelCompletionStream {
                 if frame.opcode == .ping {
                     // Send pong response
-                    let pongFrame = WebSocketFrame(fin: true, opcode: .pong, data: frame.data)
+                    let unmasked = await listener.unmaskedData(frame)
+                    let pongFrame = WebSocketFrame(fin: true, opcode: .pong, data: ByteBuffer(buffer: unmasked))
                     try await serverClientDelegate.writer?.write(pongFrame)
                 }
             }

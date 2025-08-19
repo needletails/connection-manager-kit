@@ -8,6 +8,7 @@
 @_exported import NIOPosix
 @_exported import NIOWebSocket
 @_exported import NIOSSL
+@_exported import NIOHTTP1
 
 // Re-export WebSocket types for testing
 public typealias WebSocketEvent = ConnectionManagerKit.SocketReceiver.WebSocketEvent

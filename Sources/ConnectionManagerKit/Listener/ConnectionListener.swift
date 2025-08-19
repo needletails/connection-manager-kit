@@ -256,6 +256,14 @@ public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceL
         try await runListener(serverService: serverService)
     }
     
+    public func unmaskedData(_ frame: WebSocketFrame) -> ByteBuffer {
+        var frameData = frame.data
+        if let maskingKey = frame.maskKey {
+            frameData.webSocketUnmask(maskingKey)
+        }
+        return frameData
+    }
+    
     private func runListener(serverService: ServerService<Inbound, Outbound>) async throws {
         self.serverService = serverService
         serviceGroup = ServiceGroup(
