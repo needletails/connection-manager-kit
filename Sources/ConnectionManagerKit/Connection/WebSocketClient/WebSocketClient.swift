@@ -32,7 +32,6 @@ public final class SocketReceiver: Sendable {
     /// Inbound WebSocket message kinds delivered to `messageStream`.
     public enum WebSocketOpcode: Sendable, Equatable {
         case text(String)
-        case message(String?)
         case binary(Data?)
         case ping(Data?)
         case pong(Data?)
