@@ -13,8 +13,8 @@ A modern, cross-platform networking framework built on SwiftNIO for managing net
 
 ### 🔗 Cross-Platform Networking
 - **Apple Platforms** - iOS 17.0+, macOS 14.0+, tvOS 17.0+, watchOS 10.0+
-- **Android Support** - Android Compatability with NIO
-- **Linux Support** - Linux compatibility with NIO
+- **Android Support** - Android compatibility with SwiftNIO (see Android section)
+- **Linux Support** - Linux compatibility with SwiftNIO
 - **Swift 6.0+** - Latest Swift language features
 - **Async/Await** - Modern concurrency throughout
 
@@ -28,10 +28,10 @@ A modern, cross-platform networking framework built on SwiftNIO for managing net
 - **Network Monitoring** - Real-time network event tracking
 
 ### 🔐 Security & TLS
-- **TLS Support** - Native TLS/SSL with customizable configurations
+- **TLS Support** - Transport encryption with TLS/SSL and customizable configurations
 - **Certificate Validation** - Secure certificate handling
-- **Encrypted Transport** - End-to-end encryption support
-- **Security Best Practices** - Industry-standard security patterns
+- **No Built-in E2EE** - End-to-end encryption is not provided by this library; add your own application-layer encryption if needed (e.g., integrate [Post Quantum Solace](https://github.com/needletails/post-quantum-solace))
+- **Security Best Practices** - Industry-standard transport security patterns
 
 ### 📡 Advanced Transport
 - **Multi-Server Support** - Connect to multiple servers simultaneously
@@ -228,7 +228,7 @@ let client = await WebSocketClient.shared
 let url = URL(string: "wss://example.com/chat")!
 try await client.connect(
     url: url,
-    headers: ["Authorization": "Bearer <token>"]
+    headers: HTTPHeaders([("Authorization", "Bearer <token>")])
 )
 
 // Or connect by parameters
@@ -237,7 +237,7 @@ try await client.connect(
     port: 443,
     enableTLS: true,
     route: "/chat",
-    headers: ["Sec-WebSocket-Protocol": "chat.v1"],
+    headers: HTTPHeaders([("Sec-WebSocket-Protocol", "chat.v1")]),
     retryStrategy: .exponential(initialDelay: .seconds(1), maxDelay: .seconds(30))
 )
 
@@ -285,6 +285,7 @@ await client.shutDown()
 
 - Pass additional HTTP headers via the `headers` parameter on `connect(...)` (e.g., `Authorization`, `Sec-WebSocket-Protocol`).
 - Use `wss://` or set `enableTLS: true` to enable TLS. For advanced TLS, provide `tlsPreKeyed`.
+- Security note: WebSocket frames are only transport-encrypted with TLS. There is no E2EE in the WebSocket API.
 
 ### Heartbeats (Auto Ping/Pong)
 
@@ -294,6 +295,29 @@ await client.shutDown()
   - `autoPingTimeout: TimeInterval` (default 10s) – disconnects the route if a `pong` is not received in time.
 
 See the full WebSocket quick start: [WebSocket Quick Start](Sources/ConnectionManagerKit/Documentation.docc/WebSocketQuickStart.md)
+
+## 🤖 Android Support
+
+ConnectionManagerKit can run on Android via the Swift for Android toolchain and SwiftNIO.
+
+### Requirements
+
+- Android NDK r26+ and a recent Android toolchain for Swift
+- CMake and Ninja recommended for faster builds
+
+### Toolchain and Documentation
+
+- Install a Swift Android toolchain compatible with your target ABI(s) and NDK.
+- Refer to the toolchain's documentation for build, packaging, and integration steps (AAR/JNI), including how to bundle the Swift runtime and required SwiftNIO libraries.
+
+### TLS on Android
+
+- TLS uses `NIOSSL` (BoringSSL). Make sure your Android Swift toolchain includes BoringSSL for your target triples. If unavailable, disable TLS by setting `enableTLS: false`.
+
+### Known Limitations
+
+- No built-in end-to-end encryption (E2EE). Use an application-layer scheme if needed (e.g., [Post Quantum Solace](https://github.com/needletails/post-quantum-solace)).
+- Some features may require additional configuration depending on your Swift-Android setup.
 
 ## 📚 Documentation
 
@@ -546,7 +570,6 @@ ConnectionManagerKit is designed for production use with:
 
 ## 🔗 Related Projects
 
-- [DoubleRatchetKit](https://github.com/needletails/double-ratchet-kit) - Double Ratchet Algorithm with Post-Quantum X3DH (PQXDH) integration
 - [Post Quantum Solace](https://github.com/needletails/post-quantum-solace) - Post-Quantum cryptographic messaging SDK
 - [NeedleTailIRC](https://github.com/needletails/needletail-irc) - IRC transport layer
 
