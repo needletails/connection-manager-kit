@@ -499,24 +499,22 @@ actor WebSocketTests {
         
         // Safely unwrap the optional AsyncSequence
         guard let eventStream = await webSocket.socketReceiver.eventStream else {
-            // Handle the missing stream (e.g., throw or return)
             return
         }
         
-        // Wait for event response by monitoring the server's completion stream
-        for try await event in eventStream {
-            switch event {
-            case .networkEvent(let event):
-                switch event {
-                case .viabilityChanged(let changed):
-                    #expect(changed.isViable)
-                    await webSocket.socketReceiver.eventContinuation?.finish()
-                default:
-                    break
-                }
-            default:
-               break
+        // Cross-platform: On Apple, expect a viabilityChanged event; on Linux, wait for channelActive
+        for await event in eventStream {
+            #if canImport(Network)
+            if case .networkEvent(let e) = event,
+               case .viabilityChanged(let changed) = e {
+                #expect(changed.isViable)
+                break
             }
+            #else
+            if case .channelActive = event {
+                break
+            }
+            #endif
         }
         
         // Cleanup
@@ -770,21 +768,17 @@ actor WebSocketTests {
             return
         }
         
-        // Wait for pong response
+        // Wait for pong response with bounded loop
         var pongReceived = false
-        let timeout = Task {
-            try await Task.sleep(for: .seconds(3))
-        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
         loop: for await frame in messageStream {
             if case let .pong(receivedData) = frame {
                 #expect(receivedData == pingData)
                 pongReceived = true
                 break loop
             }
-            if timeout.isCancelled { break }
-            if Task.isCancelled { break }
+            if ContinuousClock.now >= deadline { break }
         }
-        _ = timeout
         #expect(pongReceived == true, "Expected ping was not received by server")
         
         // Cleanup

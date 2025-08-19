@@ -2,8 +2,16 @@
 //  Protocols.swift
 //  connection-manager-kit
 //
-//  Created by Cole M on 12/2/24.
+//  Created by Cole M on 12/02/24.
 //
+//  Copyright (c) 2025 NeedleTails Organization.
+//
+//  This project is licensed under the MIT License.
+//
+//  See the LICENSE file for more information.
+//
+//  This file is part of the ConnectionManagerKit Project
+
 import Foundation
 import NIOCore
 import NIOSSL
