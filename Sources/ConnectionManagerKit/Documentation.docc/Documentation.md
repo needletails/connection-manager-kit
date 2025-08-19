@@ -264,6 +264,7 @@ Task {
 - <doc:ConnectionDelegate>
 - <doc:ChannelContextDelegate>
 - <doc:WebSocketQuickStart>
+  - WebSocket headers, TLS, retry strategies, and heartbeats
 
 ### Server-Side
 

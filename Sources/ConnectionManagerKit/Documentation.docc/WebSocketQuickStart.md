@@ -15,7 +15,7 @@ let client = await WebSocketClient.shared
 let url = URL(string: "wss://example.com/chat")!
 try await client.connect(
     url: url,
-    headers: ["Authorization": "Bearer <token>"]
+    headers: HTTPHeaders([("Authorization", "Bearer <token>")])
 )
 
 // Optionally, wait until channel is active before sending (useful in tests)
@@ -34,7 +34,7 @@ try await client.connect(
     port: 443,
     enableTLS: true,
     route: "/chat",
-    headers: ["Sec-WebSocket-Protocol": "chat.v1"],
+    headers: HTTPHeaders([("Sec-WebSocket-Protocol", "chat.v1")]),
     retryStrategy: .exponential(initialDelay: .seconds(1), maxDelay: .seconds(30))
 )
 ```
