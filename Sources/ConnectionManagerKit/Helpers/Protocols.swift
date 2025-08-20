@@ -299,7 +299,7 @@ extension WebSocketListenerDelegate{
     ) async {}
 }
 extension ListenerDelegate {
-    func didBindServer<Inbound: Sendable, Outbound: Sendable>(channel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>) async {}
+    public func didBindServer<Inbound: Sendable, Outbound: Sendable>(channel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>) async {}
 }
 
 /// A protocol for handling service listener events and configuration.
