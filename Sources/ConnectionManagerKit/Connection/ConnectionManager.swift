@@ -169,7 +169,7 @@ public protocol ConnectionManagerDelegate: AnyObject, Sendable {
 }
 
 extension ConnectionManagerDelegate {
-    func deliverChannel(_ channel: NIOAsyncChannel<Inbound, Outbound>, manager: ConnectionManager<Inbound, Outbound>, cacheKey: String) async {}
+    public func deliverChannel(_ channel: NIOAsyncChannel<Inbound, Outbound>, manager: ConnectionManager<Inbound, Outbound>, cacheKey: String) async {}
 }
 
 /// Configuration for connection retry strategies.
