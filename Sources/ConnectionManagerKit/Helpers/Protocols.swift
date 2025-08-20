@@ -289,12 +289,12 @@ public protocol WebSocketListenerDelegate {
 }
 
 extension TCPListenerDelegate{
-    func didBindTCPServer<Inbound: Sendable, Outbound: Sendable>(
+    public func didBindTCPServer<Inbound: Sendable, Outbound: Sendable>(
         channel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>
     ) async {}
 }
 extension WebSocketListenerDelegate{
-    func didBindWebSocketServer<Inbound: Sendable, Outbound: Sendable>(
+    public func didBindWebSocketServer<Inbound: Sendable, Outbound: Sendable>(
         channel: NIOAsyncChannel<EventLoopFuture<NIOAsyncChannel<Inbound, Outbound>>, Never>
     ) async {}
 }
