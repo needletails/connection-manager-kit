@@ -166,7 +166,7 @@ public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceL
     }
     
     public init(
-        logger: NeedleTailLogger = NeedleTailLogger(.init(label: "[Connection Listener]")),
+        logger: NeedleTailLogger = NeedleTailLogger("[Connection Listener]"),
         configuration: ListenerConfiguration = ListenerConfiguration()
     ) {
         self.logger = logger
@@ -176,7 +176,7 @@ public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceL
     
     /// Convenience initializer for ByteBuffer types (most common use case)
     public static func byteBuffer(
-        logger: NeedleTailLogger = NeedleTailLogger(.init(label: "[Connection Listener]")),
+        logger: NeedleTailLogger = NeedleTailLogger("[Connection Listener]"),
         configuration: ListenerConfiguration = ListenerConfiguration()
     ) -> ConnectionListener<ByteBuffer, ByteBuffer> {
         return ConnectionListener<ByteBuffer, ByteBuffer>(logger: logger, configuration: configuration)
