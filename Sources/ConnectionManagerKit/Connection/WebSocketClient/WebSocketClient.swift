@@ -13,7 +13,9 @@
 //  This file is part of the ConnectionManagerKit Project
 
 import Foundation
+#if canImport(Observation)
 import Observation
+#endif
 import NIOFoundationCompat
 import NIOHTTP1
 #if canImport(Network)
@@ -26,8 +28,12 @@ import Network
 /// and channel lifecycle updates. Streams are lazily created and explicitly
 /// finished during `WebSocketClient.shutDown()` to avoid resource leaks.
 @MainActor
+#if canImport(Observation)
 @Observable
+#endif
 public final class SocketReceiver: Sendable {
+    
+    public init() {}
     
     /// Inbound WebSocket message kinds delivered to `messageStream`.
     public enum WebSocketOpcode: Sendable, Equatable {
@@ -102,6 +108,7 @@ public final class SocketReceiver: Sendable {
         if messageStream == nil {
             makeMessageStream()
         }
+#if canImport(Observation)
         _ = withObservationTracking {
             self.webSocketFrame
         } onChange: {
@@ -110,6 +117,9 @@ public final class SocketReceiver: Sendable {
                 self.messageContinuation?.yield(message)
             }
         }
+#else
+        self.messageContinuation?.yield(message)
+#endif
         webSocketFrame = message
     }
 #if canImport(Network)
@@ -118,6 +128,7 @@ public final class SocketReceiver: Sendable {
         if eventStream == nil {
             makeEventStream()
         }
+#if canImport(Observation)
         _ = withObservationTracking {
             self.networkEvent
         } onChange: {
@@ -126,6 +137,9 @@ public final class SocketReceiver: Sendable {
                 self.eventContinuation?.yield(.networkEvent(event))
             }
         }
+#else
+        self.eventContinuation?.yield(.networkEvent(event))
+#endif
         self.networkEvent = .networkEvent(event)
     }
 #else
@@ -134,6 +148,7 @@ public final class SocketReceiver: Sendable {
         if eventStream == nil {
             makeEventStream()
         }
+#if canImport(Observation)
         _ = withObservationTracking {
             self.networkEvent
         } onChange: {
@@ -142,6 +157,9 @@ public final class SocketReceiver: Sendable {
                 self.eventContinuation?.yield(.networkEvent(event))
             }
         }
+#else
+        self.eventContinuation?.yield(.networkEvent(event))
+#endif
         self.networkEvent = .networkEvent(event)
     }
 #endif
@@ -151,6 +169,7 @@ public final class SocketReceiver: Sendable {
         if eventStream == nil {
             makeEventStream()
         }
+#if canImport(Observation)
         _ = withObservationTracking {
             self.networkEvent
         } onChange: {
@@ -159,6 +178,9 @@ public final class SocketReceiver: Sendable {
                 self.eventContinuation?.yield(.error(error))
             }
         }
+#else
+        self.eventContinuation?.yield(.error(error))
+#endif
         self.networkEvent = .error(error)
     }
     
@@ -167,6 +189,7 @@ public final class SocketReceiver: Sendable {
         if eventStream == nil {
             makeEventStream()
         }
+#if canImport(Observation)
         _ = withObservationTracking {
             self.networkEvent
         } onChange: {
@@ -175,6 +198,9 @@ public final class SocketReceiver: Sendable {
                 self.eventContinuation?.yield(.channelActive)
             }
         }
+#else
+        self.eventContinuation?.yield(.channelActive)
+#endif
         self.networkEvent = .channelActive
     }
     
@@ -183,6 +209,7 @@ public final class SocketReceiver: Sendable {
         if eventStream == nil {
             makeEventStream()
         }
+#if canImport(Observation)
         _ = withObservationTracking {
             self.networkEvent
         } onChange: {
@@ -191,6 +218,9 @@ public final class SocketReceiver: Sendable {
                 self.eventContinuation?.yield(.channelInactive)
             }
         }
+#else
+        self.eventContinuation?.yield(.channelInactive)
+#endif
         self.networkEvent = .channelInactive
     }
 }
