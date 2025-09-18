@@ -745,26 +745,33 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         
 #if !canImport(Network)
         func socketChannelCreator(tlsPreKeyed: TLSPreKeyedConfiguration? = nil) async throws -> NIOAsyncChannel<Inbound, Outbound> {
-            var tlsConfiguration = tlsPreKeyed?.tlsConfiguration
-            if tlsPreKeyed == nil {
-                tlsConfiguration = TLSConfiguration.makeClientConfiguration()
-                tlsConfiguration?.minimumTLSVersion = .tlsv13
-                tlsConfiguration?.maximumTLSVersion = .tlsv13
-            }
-            guard let tlsConfiguration = tlsConfiguration else { throw Errors.tlsNotConfigured }
-            
-            let sslContext = try NIOSSLContext(configuration: tlsConfiguration)
             let client = ClientBootstrap(group: group)
-            let bootstrap = try NIOClientTCPBootstrap(
-                client,
-                tls: NIOSSLClientTLSProvider(
-                    context: sslContext,
-                    serverHostname: server.host
-                )
-            )
-            
+
+            var tlsConfiguration: TLSConfiguration?
             if server.enableTLS {
+                logger.log(level: .info, message: "TLS enabled for connection to \(server.host):\(server.port)")
+                if let tlsPreKeyed {
+                    tlsConfiguration = tlsPreKeyed.tlsConfiguration
+                } else {
+                    tlsConfiguration = TLSConfiguration.makeClientConfiguration()
+                    tlsConfiguration?.minimumTLSVersion = .tlsv13
+                    tlsConfiguration?.maximumTLSVersion = .tlsv13
+                }
+
+                guard let tlsConfiguration = tlsConfiguration else {
+                    throw Errors.tlsNotConfigured
+                }
+                let sslContext = try NIOSSLContext(configuration: tlsConfiguration)
+                let bootstrap = try NIOClientTCPBootstrap(
+                    client,
+                    tls: NIOSSLClientTLSProvider(
+                        context: sslContext,
+                        serverHostname: server.host
+                    )
+                )
                 bootstrap.enableTLS()
+            } else {
+                logger.log(level: .info, message: "TLS not enabled for connection to \(server.host):\(server.port)")
             }
             
             if enabledWebsocket {

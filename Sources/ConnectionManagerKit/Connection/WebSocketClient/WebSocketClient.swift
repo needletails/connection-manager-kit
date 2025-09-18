@@ -13,7 +13,7 @@
 //  This file is part of the ConnectionManagerKit Project
 
 import Foundation
-#if canImport(Observation)
+#if canImport(Observation) && !os(Linux)
 import Observation
 #endif
 import NIOFoundationCompat
@@ -28,7 +28,7 @@ import Network
 /// and channel lifecycle updates. Streams are lazily created and explicitly
 /// finished during `WebSocketClient.shutDown()` to avoid resource leaks.
 @MainActor
-#if canImport(Observation)
+#if canImport(Observation) && !os(Linux)
 @Observable
 #endif
 public final class SocketReceiver: Sendable {
@@ -108,7 +108,7 @@ public final class SocketReceiver: Sendable {
         if messageStream == nil {
             makeMessageStream()
         }
-#if canImport(Observation)
+#if canImport(Observation) && !os(Linux)
         _ = withObservationTracking {
             self.webSocketFrame
         } onChange: {
@@ -128,7 +128,7 @@ public final class SocketReceiver: Sendable {
         if eventStream == nil {
             makeEventStream()
         }
-#if canImport(Observation)
+#if canImport(Observation) && !os(Linux)
         _ = withObservationTracking {
             self.networkEvent
         } onChange: {
@@ -148,7 +148,7 @@ public final class SocketReceiver: Sendable {
         if eventStream == nil {
             makeEventStream()
         }
-#if canImport(Observation)
+#if canImport(Observation) && !os(Linux)
         _ = withObservationTracking {
             self.networkEvent
         } onChange: {
@@ -169,7 +169,7 @@ public final class SocketReceiver: Sendable {
         if eventStream == nil {
             makeEventStream()
         }
-#if canImport(Observation)
+#if canImport(Observation) && !os(Linux)
         _ = withObservationTracking {
             self.networkEvent
         } onChange: {
@@ -189,7 +189,7 @@ public final class SocketReceiver: Sendable {
         if eventStream == nil {
             makeEventStream()
         }
-#if canImport(Observation)
+#if canImport(Observation) && !os(Linux)
         _ = withObservationTracking {
             self.networkEvent
         } onChange: {
@@ -209,7 +209,7 @@ public final class SocketReceiver: Sendable {
         if eventStream == nil {
             makeEventStream()
         }
-#if canImport(Observation)
+#if canImport(Observation) && !os(Linux)
         _ = withObservationTracking {
             self.networkEvent
         } onChange: {
