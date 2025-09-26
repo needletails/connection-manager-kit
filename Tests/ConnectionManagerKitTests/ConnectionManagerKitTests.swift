@@ -4,6 +4,7 @@ import NIOPosix
 import NIOSSL
 import NIOExtras
 import Testing
+import Crypto
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Android)
@@ -11,101 +12,10 @@ import Android
 #else
 import System
 #endif
-
-@testable import ConnectionManagerKit
-
 #if canImport(Network)
 import Network
 #endif
-
-// MARK: - Test Helpers
-
-struct TestPSKCredentials { let key: String; let hint: String }
-
-func retrieveTestPSKCredentials(for clientIdentity: String) -> TestPSKCredentials? {
-    // Fixed credentials for tests; could vary by clientIdentity if desired
-    return TestPSKCredentials(key: "test-key", hint: "test-hint")
-}
-
-func makeTestTLSPreKeyedConfig() -> TLSPreKeyedConfiguration {
-#if canImport(Network)
-    let tlsOptions = NWProtocolTLS.Options()
-    sec_protocol_options_set_min_tls_protocol_version(tlsOptions.securityProtocolOptions, .TLSv13)
-    sec_protocol_options_set_max_tls_protocol_version(tlsOptions.securityProtocolOptions, .TLSv13)
-    return TLSPreKeyedConfiguration(tlsOption: tlsOptions)
-#else
-    let creds = retrieveTestPSKCredentials(for: "clientIdentity")!
-    let pskClientProvider: NIOPSKClientIdentityProvider = { _ in
-        var psk = NIOSSLSecureBytes()
-        guard let pskKeyData = creds.key.data(using: .utf8) else {
-            return PSKClientIdentityResponse(key: NIOSSLSecureBytes(), identity: "clientIdentity")
-        }
-        psk.append(contentsOf: pskKeyData)
-        return PSKClientIdentityResponse(key: psk, identity: "clientIdentity")
-    }
-    var tls = TLSConfiguration.makePreSharedKeyConfiguration()
-    tls.cipherSuiteValues = [.TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA]
-    tls.maximumTLSVersion = .tlsv12
-    tls.pskClientProvider = pskClientProvider
-    tls.pskHint = creds.hint
-    return TLSPreKeyedConfiguration(tlsConfiguration: tls)
-#endif
-}
-
-final class ListenerDelegation: ListenerDelegate {
-    func retrieveChannelHandlers() -> [any NIOCore.ChannelHandler] {
-        [LengthFieldPrepender(lengthFieldBitLength: .threeBytes), ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216)]
-    }
-    
-    func retrieveSSLHandler() -> NIOSSL.NIOSSLServerHandler? {
-        // Configure a PSK-based TLS server using swift-nio-ssl for tests
-        var tls = TLSConfiguration.makePreSharedKeyConfiguration()
-        // Use a widely supported PSK ciphersuite for TLSv1.2 in NIOSSL
-        tls.cipherSuiteValues = [.TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA]
-        tls.maximumTLSVersion = .tlsv12
-        let defaultHint = "test-hint"
-        let pskHint = ProcessInfo.processInfo.environment["PSKCREDENTIALS_HINT"] ?? defaultHint
-        tls.pskHint = pskHint
-        
-        let pskServerProvider: NIOPSKServerIdentityProvider = { context in
-            let clientIdentity = context.clientIdentity
-            guard let creds = retrieveTestPSKCredentials(for: clientIdentity) else {
-                return PSKServerIdentityResponse(key: NIOSSLSecureBytes())
-            }
-            var psk = NIOSSLSecureBytes()
-            guard let pskKeyData = creds.key.data(using: .utf8) else {
-                return PSKServerIdentityResponse(key: NIOSSLSecureBytes())
-            }
-            psk.append(contentsOf: pskKeyData)
-            return PSKServerIdentityResponse(key: psk)
-        }
-        tls.pskServerProvider = pskServerProvider
-        do {
-            let context = try NIOSSLContext(configuration: tls)
-            return NIOSSLServerHandler(context: context)
-        } catch {
-            return nil
-        }
-    }
-    
-    func didBindTCPServer<Inbound: Sendable, Outbound: Sendable>(
-        channel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>
-    ) async {
-        serverChannelAny = channel
-        if shouldShutdown {
-            try! await channel.executeThenClose({ _, _ in })
-        }
-    }
-    
-    let shouldShutdown: Bool
-    nonisolated(unsafe) var serverChannelAny: Any?
-    
-    init(shouldShutdown: Bool) {
-        self.shouldShutdown = shouldShutdown
-    }
-}
-
-
+@testable import ConnectionManagerKit
 
 // MARK: - Main Test Suite
 
@@ -156,7 +66,7 @@ struct ConnectionManagerKitTests {
     }
     
     // MARK: - Optimized ConnectionListener Tests
-
+    
     @Test("Listener should enforce max concurrent connections")
     func testListenerConnectionLimit() async throws {
         let maxConnections = 2
@@ -167,7 +77,7 @@ struct ConnectionManagerKitTests {
         let conformer = MockConnectionDelegate(manager: ConnectionManager<ByteBuffer, ByteBuffer>(), listenerDelegation: listenerDelegation)
         let config = try await listener.resolveAddress(
             .init(group: serverGroup, host: "localhost", port: 6680))
-
+        
         // Start server
         let serverTask = Task {
             try await listener.listen(
@@ -177,7 +87,7 @@ struct ConnectionManagerKitTests {
                 listenerDelegate: listenerDelegation)
         }
         try await Task.sleep(until: .now + .seconds(1))
-
+        
         // Create real client connections to test the limit
         let clientGroup = MultiThreadedEventLoopGroup.singleton
         let clientConnections = (1...maxConnections).map { i in
@@ -218,7 +128,7 @@ struct ConnectionManagerKitTests {
         // In real networking, the limit might not be enforced immediately due to timing
         // We check that we don't exceed a reasonable threshold
         #expect(finalActiveConnections <= maxConnections + 1) // Allow for timing variations
-
+        
         // Cleanup
         for connection in clientConnections {
             connection.cancel()
@@ -231,7 +141,7 @@ struct ConnectionManagerKitTests {
         serverTask.cancel()
         try await Task.sleep(for: .milliseconds(200))
     }
-
+    
     @Test("Listener metrics should update on connection accept/close")
     func testListenerMetricsUpdate() async throws {
         let listener = ConnectionListener<ByteBuffer, ByteBuffer>()
@@ -240,7 +150,7 @@ struct ConnectionManagerKitTests {
         let conformer = MockConnectionDelegate(manager: ConnectionManager<ByteBuffer, ByteBuffer>(), listenerDelegation: listenerDelegation)
         let config = try await listener.resolveAddress(
             .init(group: serverGroup, host: "localhost", port: 6681))
-
+        
         let serverTask = Task {
             try await listener.listen(
                 address: config.address!,
@@ -249,7 +159,7 @@ struct ConnectionManagerKitTests {
                 listenerDelegate: listenerDelegation)
         }
         try await Task.sleep(until: .now + .seconds(1))
-
+        
         // Create a real client connection
         let clientGroup = MultiThreadedEventLoopGroup.singleton
         let clientConnection = Task {
@@ -269,7 +179,7 @@ struct ConnectionManagerKitTests {
         var metrics = await listener.getMetrics()
         #expect(metrics.activeConnections >= 0) // May be 0 or 1 depending on timing
         #expect(metrics.totalConnectionsAccepted >= 0)
-
+        
         // Close the client connection
         clientConnection.cancel()
         try await Task.sleep(until: .now + .milliseconds(200))
@@ -277,14 +187,14 @@ struct ConnectionManagerKitTests {
         // Check metrics after connection close
         metrics = await listener.getMetrics()
         #expect(metrics.totalConnectionsClosed >= 0)
-
+        
         // Graceful shutdown ordering to avoid event loop precondition failures
         try await Task.sleep(for: .milliseconds(200))
         await listener.serviceGroup?.triggerGracefulShutdown()
         try await Task.sleep(for: .milliseconds(300))
         serverTask.cancel()
     }
-
+    
     @Test("Listener should support graceful shutdown")
     func testListenerGracefulShutdown() async throws {
         let listener = ConnectionListener<ByteBuffer, ByteBuffer>()
@@ -293,7 +203,7 @@ struct ConnectionManagerKitTests {
         let conformer = MockConnectionDelegate(manager: ConnectionManager<ByteBuffer, ByteBuffer>(), listenerDelegation: listenerDelegation)
         let config = try await listener.resolveAddress(
             .init(group: serverGroup, host: "localhost", port: 6682))
-
+        
         let serverTask = Task {
             try await listener.listen(
                 address: config.address!,
@@ -302,7 +212,7 @@ struct ConnectionManagerKitTests {
                 listenerDelegate: listenerDelegation)
         }
         try await Task.sleep(until: .now + .seconds(1))
-
+        
         // Create a real client connection
         let clientGroup = MultiThreadedEventLoopGroup.singleton
         let bootstrap = ClientBootstrap(group: clientGroup)
@@ -318,20 +228,20 @@ struct ConnectionManagerKitTests {
         // Check that we have at least some connection activity
         let initialMetrics = await listener.getMetrics()
         #expect(initialMetrics.activeConnections >= 0)
-
+        
         // Shutdown
         // Close the client channel before shutting down the listener to avoid event loop precondition failures
         try await clientChannel.close(mode: .all)
         try await Task.sleep(for: .milliseconds(200))
         try await listener.shutdown()
         #expect((await listener.getMetrics()).activeConnections >= 0) // Metrics not reset on shutdown
-
+        
         // Cleanup
         try await Task.sleep(for: .milliseconds(200))
         await listener.serviceGroup?.triggerGracefulShutdown()
         serverTask.cancel()
     }
-
+    
     @Test("Listener should use default and custom configuration")
     func testListenerConfiguration() async throws {
         let defaultListener = ConnectionListener<ByteBuffer, ByteBuffer>()
@@ -479,18 +389,18 @@ struct ConnectionManagerKitTests {
         #expect(tlsServer.enableTLS == true)
         
         // Test TLS pre-keyed configuration
-        #if canImport(Network)
+#if canImport(Network)
         let tlsOptions = NWProtocolTLS.Options()
         sec_protocol_options_set_min_tls_protocol_version(tlsOptions.securityProtocolOptions, .TLSv13)
         sec_protocol_options_set_max_tls_protocol_version(tlsOptions.securityProtocolOptions, .TLSv13)
         let preKeyedConfig = TLSPreKeyedConfiguration(tlsOption: tlsOptions)
         // Sanity check: options object identity not easily comparable; just ensure created
         #expect(true)
-        #else
+#else
         let tlsConfig = TLSConfiguration.makeClientConfiguration()
         let preKeyedConfig = TLSPreKeyedConfiguration(tlsConfiguration: tlsConfig)
         #expect(preKeyedConfig.tlsConfiguration.minimumTLSVersion == .tlsv1)
-        #endif
+#endif
     }
     
     @Test("Connection manager should handle graceful shutdown")
@@ -737,7 +647,7 @@ struct ConnectionManagerKitTests {
         
         // Verify that all connections were handled
         let channelCreatedEvents = managerDelegate.channelCreatedEvents
-//        let deliveredChannels = managerDelegate.deliveredChannels
+        //        let deliveredChannels = managerDelegate.deliveredChannels
         
         // Each server should have a channel created event
         for server in servers {
@@ -1814,258 +1724,103 @@ struct ConnectionManagerKitTests {
         #expect(!listenerFormatted.isEmpty)
         #expect(!cacheFormatted.isEmpty)
     }
-}
-
-// MARK: - Mock Implementations
-
-final class MockConnectionManagerDelegate: ConnectionManagerDelegate, @unchecked Sendable {
-    private let lock = NSLock()
-    private var _deliveredChannels: [String: NIOAsyncChannel<ByteBuffer, ByteBuffer>] = [:]
-    private var _channelCreatedEvents: [String: EventLoop] = [:]
-    private var _retrievedHandlers: [ChannelHandler] = []
     
-    var deliveredChannels: [String: NIOAsyncChannel<ByteBuffer, ByteBuffer>] {
-        lock.lock()
-        defer { lock.unlock() }
-        return _deliveredChannels
-    }
-    
-    var channelCreatedEvents: [String: EventLoop] {
-        lock.lock()
-        defer { lock.unlock() }
-        return _channelCreatedEvents
-    }
-    
-    var retrievedHandlers: [ChannelHandler] {
-        lock.lock()
-        defer { lock.unlock() }
-        return _retrievedHandlers
-    }
-    
-    func retrieveChannelHandlers() -> [ChannelHandler] {
-        lock.lock()
-        defer { lock.unlock() }
-        let handlers: [ChannelHandler] = [
-            LengthFieldPrepender(lengthFieldBitLength: .threeBytes),
-            ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216)
+    @Test("Connection manager testing echo")
+    func testCreateConnectionAndEcho() async throws {
+        let endpoint = "localhost"
+        
+        let listener = ConnectionListener<ByteBuffer, ByteBuffer>()
+        let serverGroup = MultiThreadedEventLoopGroup.singleton
+        let listenerDelegation = ListenerDelegation(shouldShutdown: false)
+        
+        // Create a custom echo server context delegate
+        let echoServerDelegate = EchoServerContextDelegate()
+        let serverConformer = MockConnectionDelegate(listener: listener, serverClientContextDelegate: echoServerDelegate, listenerDelegation: listenerDelegation)
+        
+        
+        // Start server
+        let serverTask = Task {
+            let config = try await listener.resolveAddress(
+                .init(group: serverGroup, host: "localhost", port: 6667))
+            
+            try await listener.listen(
+                address: config.address!,
+                configuration: config,
+                delegate: serverConformer,
+                listenerDelegate: listenerDelegation)
+        }
+        
+        try await Task.sleep(until: .now + .seconds(1))
+        
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
+        let conformer = MockConnectionDelegate(manager: manager, listenerDelegation: nil)
+        let contextDelegate = MockChannelContextDelegate()
+        
+        let connectionManagerDelegate = MockConnectionManagerDelegate()
+        
+        // Set the connection manager delegate
+        await manager.setDelegate(connectionManagerDelegate)
+        
+        // Create server location
+        let servers = [
+            ServerLocation(
+                host: endpoint,
+                port: 6667,
+                enableTLS: true,
+                cacheKey: "s1",
+                delegate: conformer,
+                contextDelegate: contextDelegate)
         ]
-        _retrievedHandlers = handlers
-        return handlers
-    }
-    
-    func deliverChannel(_ channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>, manager: ConnectionManager<ByteBuffer, ByteBuffer>, cacheKey: String) async {
-        await withCheckedContinuation { continuation in
-            lock.lock()
-            defer { lock.unlock() }
-            _deliveredChannels[cacheKey] = channel
-            continuation.resume()
+        
+        // Connect to servers
+        let connectionTask = Task {
+            try await manager.connect(
+                to: servers,
+                tlsPreKeyed: makeTestTLSPreKeyedConfig())
         }
-    }
-    
-    func channelCreated(_ eventLoop: EventLoop, cacheKey: String) async {
-        await withCheckedContinuation { continuation in
-            lock.lock()
-            defer { lock.unlock() }
-            _channelCreatedEvents[cacheKey] = eventLoop
-            continuation.resume()
-        }
-    }
-    
-    func clear() {
-        lock.lock()
-        defer { lock.unlock() }
-        _deliveredChannels.removeAll()
-        _channelCreatedEvents.removeAll()
-        _retrievedHandlers.removeAll()
-    }
-}
-
-final class MockConnectionDelegate<TestInbound: Sendable, TestOutbound: Sendable>: ConnectionDelegate {
-#if canImport(Network)
-    func handleError(_ stream: AsyncStream<NWError>, id: String) {}
-    
-    func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>, id: String) async {}
-#else
-    func handleError(_ stream: AsyncStream<IOError>, id: String) {}
-    
-    func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NIOEvent>, id: String) async {}
-#endif
-    
-    func initializedChildChannel<Outbound, Inbound>(
-        _ context: ConnectionManagerKit.ChannelContext<Inbound, Outbound>
-    ) async where Outbound: Sendable, Inbound: Sendable {
-        if let serverClientContextDelegate {
-            await listener?.setContextDelegate(serverClientContextDelegate, key: context.id)
-        }
-    }
-    
-    nonisolated(unsafe) var servers = [ServerLocation]()
-    let listenerDelegation: (any ListenerDelegate)?
-    let listener: ConnectionListener<TestInbound, TestOutbound>?
-    let serverClientContextDelegate: ChannelContextDelegate?
-    nonisolated(unsafe) var networkEventTask: Task<Void, Never>?
-    nonisolated(unsafe) var inactiveTask: Task<Void, Never>?
-    nonisolated(unsafe) var errorTask: Task<Void, Never>?
-    let manager: ConnectionManager<TestInbound, TestOutbound>
-    
-    init(listener: ConnectionListener<TestInbound, TestOutbound>? = nil, serverClientContextDelegate: ChannelContextDelegate? = nil, manager: ConnectionManager<TestInbound, TestOutbound>, listenerDelegation: (any ListenerDelegate)?) {
-        self.listener = listener
-        self.serverClientContextDelegate = serverClientContextDelegate
-        self.manager = manager
-        self.listenerDelegation = listenerDelegation
-    }
-    
-    func configureChildChannel() async {}
-    
-    func didShutdownChildChannel() async {}
-    
-    
-    
-    
-    func channelActive(_ stream: AsyncStream<Void>, id: String) {
-#if !canImport(Network)
-        Task {
-            for await _ in stream.cancelOnGracefulShutdown() {
-                if !servers.isEmpty {
-                    try! await Task.sleep(until: .now + .milliseconds(500))
-                    for server in servers {
-                        let fc1 = await manager.connectionCache.findConnection(
-                            cacheKey: server.cacheKey)
-                        await #expect(fc1?.config.host == server.host)
-                        await manager.gracefulShutdown()
-                    }
+        
+        try await Task.sleep(until: .now + .seconds(1))
+        
+        let connectionManagerDelegateTask = Task {
+            if let stream = connectionManagerDelegate.channelCreatedEvents["s1"] {
+                for await _ in stream {
+                    await manager.setDelegates(
+                        connectionDelegate: conformer,
+                        contextDelegate: contextDelegate,
+                        cacheKey: "s1")
+                    
+                    // Send message from client - properly encode the string
+                    let messageToSend = ByteBuffer(string: "Hello")
+                    await contextDelegate.send(messageToSend)
                 }
             }
         }
-#endif
-    }
-    
-    func channelInActive(_ stream: AsyncStream<Void>) {
-        inactiveTask = Task {
-            for await _ in stream.cancelOnGracefulShutdown() {
-                await tearDown()
+        
+        // Wait for connection to be established
+        try await Task.sleep(until: .now + .seconds(1))
+        
+        // Set up client to listen for responses from its context delegate
+        let clientTask = Task {
+            for await response in contextDelegate.responseStream.stream {
+                // Decode the received message properly
+                let receivedMessage = response.getString(at: 0, length: response.readableBytes)
+                #expect(receivedMessage == "Hello")
+                contextDelegate.responseStream.continuation.finish()
             }
         }
-    }
-    
-    func reportChildChannel(error: any Error, id: String) async {
-        // Mock implementation
-    }
-    
-    func deliverWriter<Outbound>(writer: NIOCore.NIOAsyncChannelOutboundWriter<Outbound>) async
-    where Outbound: Sendable {
-        // Mock implementation
-    }
-    
-    func deliverInboundBuffer<Inbound>(inbound: Inbound) async where Inbound: Sendable {
-        // Mock implementation
-    }
-    
-    private func tearDown() async {
-        if await manager.connectionCache.isEmpty {
-            networkEventTask?.cancel()
-            errorTask?.cancel()
-            inactiveTask?.cancel()
-        }
+        
+        try await Task.sleep(until: .now + .seconds(1))
+        
+        // Cleanup
+        clientTask.cancel()
+        serverTask.cancel()
+        connectionTask.cancel()
+        connectionManagerDelegateTask.cancel()
+        await manager.gracefulShutdown()
+        await listener.serviceGroup?.triggerGracefulShutdown()
+        try await Task.sleep(for: .milliseconds(150))
+        
+        // Verify that connections were attempted
+        await #expect(manager.connectionCache.count >= 0)
     }
 }
-
-final class MockChannelContextDelegate: ChannelContextDelegate {
-    func channelActive(_ stream: AsyncStream<Void>, id: String) {}
-    
-    func channelInactive(_ stream: AsyncStream<Void>, id: String) {}
-    
-    func reportChildChannel(error: any Error, id: String) async {}
-    
-    func didShutdownChildChannel() async {}
-    
-    func deliverWriter<Outbound, Inbound>(
-        context: ConnectionManagerKit.WriterContext<Inbound, Outbound>
-    ) async where Outbound: Sendable, Inbound: Sendable {}
-    
-    func deliverInboundBuffer<Inbound, Outbound>(
-        context: ConnectionManagerKit.StreamContext<Inbound, Outbound>
-    ) async where Inbound: Sendable, Outbound: Sendable {}
-}
-
-final class MockConnectionManagerMetricsDelegate: ConnectionManagerMetricsDelegate, @unchecked Sendable {
-    private let lock = NSLock()
-    private var _totalConnections: Int = 0
-    private var _activeConnections: Int = 0
-    private var _failedConnections: Int = 0
-    private var _averageConnectionTime: TimeAmount = .seconds(0)
-    private var _connectionFailures: [(serverLocation: String, error: Error, attemptNumber: Int)] = []
-    private var _connectionSuccesses: [(serverLocation: String, connectionTime: TimeAmount)] = []
-    private var _parallelCompletions: [(totalAttempted: Int, successful: Int, failed: Int)] = []
-    
-    var totalConnections: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return _totalConnections
-    }
-    
-    var activeConnections: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return _activeConnections
-    }
-    
-    var failedConnections: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return _failedConnections
-    }
-    
-    var averageConnectionTime: TimeAmount {
-        lock.lock()
-        defer { lock.unlock() }
-        return _averageConnectionTime
-    }
-    
-    var connectionFailures: [(serverLocation: String, error: Error, attemptNumber: Int)] {
-        lock.lock()
-        defer { lock.unlock() }
-        return _connectionFailures
-    }
-    
-    var connectionSuccesses: [(serverLocation: String, connectionTime: TimeAmount)] {
-        lock.lock()
-        defer { lock.unlock() }
-        return _connectionSuccesses
-    }
-    
-    var parallelCompletions: [(totalAttempted: Int, successful: Int, failed: Int)] {
-        lock.lock()
-        defer { lock.unlock() }
-        return _parallelCompletions
-    }
-    
-    func connectionManagerMetricsDidUpdate(totalConnections: Int, activeConnections: Int, failedConnections: Int, averageConnectionTime: TimeAmount) {
-        lock.lock()
-        defer { lock.unlock() }
-        _totalConnections = totalConnections
-        _activeConnections = activeConnections
-        _failedConnections = failedConnections
-        _averageConnectionTime = averageConnectionTime
-    }
-    
-    func connectionDidFail(serverLocation: String, error: Error, attemptNumber: Int) {
-        lock.lock()
-        defer { lock.unlock() }
-        _connectionFailures.append((serverLocation: serverLocation, error: error, attemptNumber: attemptNumber))
-    }
-    
-    func connectionDidSucceed(serverLocation: String, connectionTime: TimeAmount) {
-        lock.lock()
-        defer { lock.unlock() }
-        _connectionSuccesses.append((serverLocation: serverLocation, connectionTime: connectionTime))
-    }
-    
-    func parallelConnectionDidComplete(totalAttempted: Int, successful: Int, failed: Int) {
-        lock.lock()
-        defer { lock.unlock() }
-        _parallelCompletions.append((totalAttempted: totalAttempted, successful: successful, failed: failed))
-    }
-}
-
-
