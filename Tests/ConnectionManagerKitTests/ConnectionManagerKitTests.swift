@@ -279,20 +279,28 @@ struct ConnectionManagerKitTests {
                 delegate: conformer,
                 listenerDelegate: listenerDelegation)
         }
+
+        var enableTLS = false
+        var tlsPreKeyed: TLSPreKeyedConfiguration? = nil
+
+        #if !os(Linux) && !os(Android)
+            enableTLS = true
+            tlsPreKeyed = makeTestTLSPreKeyedConfig()
+        #endif
         
         // Create multiple server locations
         let servers = [
             ServerLocation(
-                host: endpoint, port: 6667, enableTLS: true, cacheKey: "s1", 
+                host: endpoint, port: 6667, enableTLS: enableTLS, cacheKey: "s1", 
                 delegate: conformer, contextDelegate: contextDelegate),
             ServerLocation(
-                host: endpoint, port: 6667, enableTLS: true, cacheKey: "s2", 
+                host: endpoint, port: 6667, enableTLS: enableTLS, cacheKey: "s2", 
                 delegate: conformer, contextDelegate: contextDelegate),
             ServerLocation(
-                host: endpoint, port: 6667, enableTLS: true, cacheKey: "s3", 
+                host: endpoint, port: 6667, enableTLS: enableTLS, cacheKey: "s3", 
                 delegate: conformer, contextDelegate: contextDelegate),
             ServerLocation(
-                host: endpoint, port: 6667, enableTLS: true, cacheKey: "s4", 
+                host: endpoint, port: 6667, enableTLS: enableTLS, cacheKey: "s4", 
                 delegate: conformer, contextDelegate: contextDelegate),
         ]
         
@@ -300,7 +308,7 @@ struct ConnectionManagerKitTests {
         
         // Connect to servers
         let connectionTask = Task {
-            try await manager.connect(to: servers, tlsPreKeyed: makeTestTLSPreKeyedConfig())
+            try await manager.connect(to: servers, tlsPreKeyed: tlsPreKeyed)
         }
         
         try await Task.sleep(until: .now + .milliseconds(500))
@@ -816,10 +824,12 @@ struct ConnectionManagerKitTests {
         
         await manager.connectionCache.cacheConnection(originalConnection, for: originalConnection.config.cacheKey)
         
+    let enableTLS = true
+
         let updatedConnection = ChildChannelService<ByteBuffer, ByteBuffer>(
             logger: .init(),
             config: .init(
-                host: "updated", port: 1, enableTLS: true, cacheKey: "update-test", 
+                host: "updated", port: 1, enableTLS: enableTLS, cacheKey: "update-test", 
                 delegate: conformer, contextDelegate: contextDelegate), 
             childChannel: nil, delegate: manager)
         
@@ -930,11 +940,13 @@ struct ConnectionManagerKitTests {
     func testServerLocationInitialization() {
         let delegate = MockConnectionDelegate<ByteBuffer, ByteBuffer>(manager: ConnectionManager(), listenerDelegation: ListenerDelegation(shouldShutdown: false))
         let contextDelegate = MockChannelContextDelegate()
+
+    let enableTLS = true
         
         let serverLocation = ServerLocation(
             host: "test.example.com",
             port: 8080,
-            enableTLS: true,
+            enableTLS: enableTLS,
             cacheKey: "test-key",
             delegate: delegate,
             contextDelegate: contextDelegate
@@ -1760,13 +1772,22 @@ struct ConnectionManagerKitTests {
         
         // Set the connection manager delegate
         await manager.setDelegate(connectionManagerDelegate)
+
+
+        var enableTLS = false
+        var tlsPreKeyed: TLSPreKeyedConfiguration? = nil
+
+        #if !os(Linux) && !os(Android)
+            enableTLS = true
+            tlsPreKeyed = makeTestTLSPreKeyedConfig()
+        #endif
         
         // Create server location
         let servers = [
             ServerLocation(
                 host: endpoint,
                 port: 6667,
-                enableTLS: true,
+                enableTLS: enableTLS,
                 cacheKey: "s1",
                 delegate: conformer,
                 contextDelegate: contextDelegate)
@@ -1776,7 +1797,7 @@ struct ConnectionManagerKitTests {
         let connectionTask = Task {
             try await manager.connect(
                 to: servers,
-                tlsPreKeyed: makeTestTLSPreKeyedConfig())
+                tlsPreKeyed: tlsPreKeyed)
         }
         
         try await Task.sleep(until: .now + .seconds(1))

@@ -97,7 +97,6 @@ func makeTestTLSPreKeyedConfig() -> TLSPreKeyedConfiguration {
         }
         
         psk.append(authenticationData)
-        self.logger.log(level: .info, message: "CREDENTIALS - KEY \(psk.count)")
         return PSKClientIdentityResponse(key: psk, identity: "clientIdentity") // Set your client identity
     }
     
@@ -111,6 +110,3 @@ func makeTestTLSPreKeyedConfig() -> TLSPreKeyedConfiguration {
 #endif
     return tlsPreKeyed
 }
-
-
-extension ByteToMessageHandler: @retroactive @unchecked Sendable {}
