@@ -16,7 +16,6 @@ import Atomics
 import Foundation
 import NIOConcurrencyHelpers
 import NIOCore
-import NIOExtras
 import NIOPosix
 import NIOSSL
 import NIOHTTP1

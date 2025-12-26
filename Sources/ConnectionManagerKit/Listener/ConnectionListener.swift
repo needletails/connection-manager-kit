@@ -15,7 +15,6 @@
 import Foundation
 import NIOCore
 import NIOPosix
-import NIOExtras
 import NIOSSL
 import ServiceLifecycle
 import NeedleTailLogger
