@@ -185,12 +185,16 @@ actor WebSocketTests {
         #expect(pongReceived == true, "Expected pong frame was not received")
         
         // Cleanup
+        clientDelegate.writer?.finish()
+        serverClientDelegate.writer?.finish()
         await manager.gracefulShutdown()
+        // Allow event loop tasks to drain before shutting down the server
+        try await Task.sleep(for: .milliseconds(300))
         await listener.serviceGroup?.triggerGracefulShutdown()
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: .milliseconds(500))
         serverTask.cancel()
         serverResponseTask.cancel()
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: .milliseconds(500))
     }
     
     // MARK: - Text Frame Tests
@@ -270,12 +274,15 @@ actor WebSocketTests {
         #expect(echoReceived == true, "Expected text echo frame was not received")
         
         // Cleanup
+        clientDelegate.writer?.finish()
+        serverClientDelegate.writer?.finish()
         await manager.gracefulShutdown()
+        try await Task.sleep(for: .milliseconds(300))
         await listener.serviceGroup?.triggerGracefulShutdown()
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: .milliseconds(500))
         serverTask.cancel()
         serverResponseTask.cancel()
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: .milliseconds(500))
     }
     
     // MARK: - Binary Frame Tests
@@ -355,12 +362,15 @@ actor WebSocketTests {
         #expect(echoReceived == true, "Expected binary echo frame was not received")
         
         // Cleanup
+        clientDelegate.writer?.finish()
+        serverClientDelegate.writer?.finish()
         await manager.gracefulShutdown()
+        try await Task.sleep(for: .milliseconds(300))
         await listener.serviceGroup?.triggerGracefulShutdown()
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: .milliseconds(500))
         serverTask.cancel()
         serverResponseTask.cancel()
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: .milliseconds(500))
     }
     
     // MARK: - Close Frame Tests
@@ -518,12 +528,14 @@ actor WebSocketTests {
         }
         
         // Cleanup
+        serverClientDelegate.writer?.finish()
         await webSocket.shutDown()
+        try await Task.sleep(for: .milliseconds(300))
         await listener.serviceGroup?.triggerGracefulShutdown()
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: .milliseconds(500))
         serverTask.cancel()
         serverResponseTask.cancel()
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: .milliseconds(500))
     }
     
     @Test("WebSocket class invalid URL")
@@ -695,6 +707,7 @@ actor WebSocketTests {
         try await Task.sleep(for: .milliseconds(500))
         
         // Cleanup
+        serverClientDelegate.writer?.finish()
         await webSocket.shutDown()
         await listener.serviceGroup?.triggerGracefulShutdown()
         try await Task.sleep(for: .milliseconds(500))
@@ -837,10 +850,11 @@ actor WebSocketTests {
         
         // Cleanup
         await webSocket.shutDown()
+        try await Task.sleep(for: .milliseconds(300))
         await listener.serviceGroup?.triggerGracefulShutdown()
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: .milliseconds(500))
         serverTask.cancel()
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: .milliseconds(500))
     }
     
     @Test("WebSocket class test event stream")
@@ -894,10 +908,11 @@ actor WebSocketTests {
 
         // Cleanup
         await webSocket.shutDown()
+        try await Task.sleep(for: .milliseconds(300))
         await listener.serviceGroup?.triggerGracefulShutdown()
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: .milliseconds(500))
         serverTask.cancel()
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: .milliseconds(500))
     }
 }
 

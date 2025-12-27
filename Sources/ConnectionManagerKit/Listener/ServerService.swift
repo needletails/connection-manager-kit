@@ -16,7 +16,6 @@ import Foundation
 import NIOCore
 import NIOPosix
 import NIOSSL
-import NIOExtras
 import NIOHTTP1
 import NIOWebSocket
 import ServiceLifecycle

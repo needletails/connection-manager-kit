@@ -204,8 +204,7 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
                             let streamContext = StreamContext<Inbound, Outbound>(
                                 id: channelId,
                                 channel: childChannel,
-                                inbound: inbound
-                            )
+                                inbound: inbound)
                             await contextDelegate?.deliverInboundBuffer(context: streamContext)
                         }
                     }
