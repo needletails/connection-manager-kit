@@ -12,9 +12,9 @@
 //
 //  This file is part of the ConnectionManagerKit Project
 
+import Foundation
 import NIOCore
 import NIOConcurrencyHelpers
-import Atomics
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Android)
@@ -35,7 +35,8 @@ public struct NetworkEventConfiguration: Sendable {
     public let eventBufferSize: Int
     /// Buffer size for channel lifecycle streams.
     public let lifecycleBufferSize: Int
-    /// Whether to enable event prioritization.
+    /// When `true`, low-signal NIOTS events (`connectToNWEndpoint`, `bindToNWEndpoint`) are not
+    /// delivered on the event stream so consumers can focus on viability, path, and connectivity.
     public let enableEventPrioritization: Bool
     
     public init(
@@ -65,7 +66,7 @@ public struct NetworkEventConfiguration: Sendable {
 /// - **Cross-Platform Support**: Works on Apple platforms and Linux with appropriate event types
 /// - **Async Streams**: Provides async streams for continuous event monitoring
 /// - **Configurable Buffering**: Customizable buffer sizes for different event types
-/// - **Event Prioritization**: Optional prioritization of critical events
+/// - **Event Prioritization**: Optional filtering of low-signal NIOTS endpoint events
 ///
 /// ## Usage Example
 /// ```swift
@@ -105,8 +106,7 @@ public struct NetworkEventConfiguration: Sendable {
 ///
 /// - Note: This class is designed to be added to the NIO channel pipeline and will
 ///   automatically start monitoring events when the channel becomes active.
-/// - Note: The monitor uses atomic operations to ensure thread safety when setting
-///   error states to prevent duplicate error reporting.
+/// - Note: Pipeline errors are forwarded on the error stream for each `errorCaught` invocation.
 public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendable {
     public typealias InboundIn = ByteBuffer
     
@@ -115,9 +115,6 @@ public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendab
     
     /// The configuration for this monitor.
     private let configuration: NetworkEventConfiguration
-    
-    /// An atomic flag to prevent duplicate error reporting.
-    private let didSetError = ManagedAtomic(false)
     
     /// A lock for synchronizing access to async stream continuations.
     private let lock = NIOLock()
@@ -229,8 +226,9 @@ public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendab
     
     /// Handles errors caught by the channel pipeline.
     ///
-    /// This method is called when the channel encounters an error. It filters for
-    /// specific network-related errors and reports them through the error stream.
+    /// Delivers `NWError` (or bridged POSIX errors) on Apple platforms, and a broader set of
+    /// `IOError` errno values on other platforms, so consumers can react to resets, timeouts,
+    /// refused connections, and path failures—not only `ENETDOWN` / `ENOTCONN`.
     ///
     /// - Parameters:
     ///   - context: The channel handler context.
@@ -257,27 +255,17 @@ public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendab
     public func errorCaught(context: ChannelHandlerContext, error: any Error) {
         context.fireErrorCaught(error)
 #if canImport(Network)
-        let nwError = error as? NWError
-        if nwError == .posix(.ENETDOWN) || nwError == .posix(.ENOTCONN), !didSetError.load(ordering: .acquiring) {
-            didSetError.store(true, ordering: .relaxed)
-            if let nwError = nwError {
-                lock.withLock { [weak self] in
-                    guard let self else { return }
-                    self.errorContinuation?.yield(nwError)
-                }
-            } 
+        if let nw = Self.nwError(from: error) {
+            _ = lock.withLock { [weak self] in
+                self?.errorContinuation?.yield(nw)
+            }
         }
-#else 
-    let error = error as? IOError
-    if error?.errnoCode == ENETDOWN || error?.errnoCode == ENOTCONN, !didSetError.load(ordering: .acquiring) {
-        didSetError.store(true, ordering: .relaxed)
-        if let error: IOError = error {
-            lock.withLock { [weak self] in
-                guard let self else { return }
-                self.errorContinuation?.yield(error)
+#else
+        if let io = error as? IOError, Self.shouldReportIOError(io) {
+            _ = lock.withLock { [weak self] in
+                self?.errorContinuation?.yield(io)
             }
-            }
-    }
+        }
 #endif
     }
     
@@ -387,16 +375,14 @@ public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendab
             eventType = nil
         }
        
-        if let eventType = eventType {
-            lock.withLock { [weak self] in
-                guard let self else { return }
-                self.eventContinuation?.yield(eventType)
+        if let eventType, Self.shouldDeliverNetworkEvent(eventType, prioritizationEnabled: configuration.enableEventPrioritization) {
+            _ = lock.withLock { [weak self] in
+                self?.eventContinuation?.yield(eventType)
             }
         }
 #else
-        lock.withLock { [weak self] in
-            guard let self else { return }
-            self.eventContinuation?.yield(NIOEvent.event(event))
+        _ = lock.withLock { [weak self] in
+            self?.eventContinuation?.yield(NIOEvent.event(event))
         }
 #endif
     }
@@ -419,9 +405,8 @@ public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendab
     /// ```
     public func channelActive(context: ChannelHandlerContext) {
         context.fireChannelActive()
-        lock.withLock { [weak self] in
-            guard let self else { return }
-            self.channelActiveContinuation?.yield()
+        _ = lock.withLock { [weak self] in
+            self?.channelActiveContinuation?.yield()
         }
     }
 
@@ -443,9 +428,70 @@ public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendab
     /// ```
     public func channelInactive(context: ChannelHandlerContext) {
         context.fireChannelInactive()
-        lock.withLock { [weak self] in
-            guard let self else { return }
-            self.channelInactiveContinuation?.yield()
+        _ = lock.withLock { [weak self] in
+            self?.channelInactiveContinuation?.yield()
         }
     }
+
+#if canImport(Network)
+    /// Bridges pipeline errors to `NWError` for the error stream.
+    private static func nwError(from error: Error) -> NWError? {
+        if let nw = error as? NWError {
+            return nw
+        }
+        if let io = error as? IOError, let bridged = nwErrorBridged(from: io) {
+            return bridged
+        }
+        let ns = error as NSError
+        if ns.domain == NSPOSIXErrorDomain {
+            let raw = Int32(ns.code)
+            if let code = POSIXErrorCode(rawValue: raw), isConnectionTransportPOSIX(code) {
+                return .posix(code)
+            }
+        }
+        return nil
+    }
+
+    private static func nwErrorBridged(from io: IOError) -> NWError? {
+        guard let code = POSIXErrorCode(rawValue: io.errnoCode), isConnectionTransportPOSIX(code) else {
+            return nil
+        }
+        return .posix(code)
+    }
+
+    private static func isConnectionTransportPOSIX(_ code: POSIXErrorCode) -> Bool {
+        switch code {
+        case .ECONNRESET, .ENOTCONN, .ENETDOWN, .ECONNREFUSED, .EPIPE, .ETIMEDOUT,
+             .ENETUNREACH, .EHOSTUNREACH, .EADDRNOTAVAIL, .ECANCELED, .ENETRESET:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func shouldDeliverNetworkEvent(_ event: NetworkEvent, prioritizationEnabled: Bool) -> Bool {
+        guard prioritizationEnabled else { return true }
+        switch event {
+        case .connectToNWEndpoint, .bindToNWEndpoint:
+            return false
+        default:
+            return true
+        }
+    }
+#else
+    private static func shouldReportIOError(_ io: IOError) -> Bool {
+        let c = io.errnoCode
+        return c == ECONNRESET
+            || c == ENOTCONN
+            || c == ENETDOWN
+            || c == EPIPE
+            || c == ECONNREFUSED
+            || c == ETIMEDOUT
+            || c == ENETUNREACH
+            || c == EHOSTUNREACH
+            || c == EADDRNOTAVAIL
+            || c == ECANCELED
+            || c == ENETRESET
+    }
+#endif
 }
