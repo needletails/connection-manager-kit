@@ -20,16 +20,16 @@ jobs:
           sudo apt-get update
           sudo apt-get -y install libcurl4-openssl-dev
 
-      - name: Install Swift 6.1.0 with Swiftly
+      - name: Install Swift 6.2.1 with Swiftly
         run: |
           curl -O https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz
           tar zxf swiftly-$(uname -m).tar.gz
           ./swiftly init --quiet-shell-followup
           source ~/.local/share/swiftly/env.sh
-          swiftly install --use 6.1.0
+          swiftly install --use 6.2.1
           echo "Looking for Swift in toolchains directory..."
           ls -la $HOME/.local/share/swiftly/toolchains/
-          SWIFT_PATH=$(find $HOME/.local/share/swiftly/toolchains/6.1.0 -name "swift" -type f 2>/dev/null | head -1)
+          SWIFT_PATH=$(find $HOME/.local/share/swiftly/toolchains/6.2.1 -name "swift" -type f 2>/dev/null | head -1)
           if [ -n "$SWIFT_PATH" ]; then
             SWIFT_PATH=$(dirname "$SWIFT_PATH")
           else
