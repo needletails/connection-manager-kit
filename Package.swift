@@ -39,7 +39,6 @@ let package = Package(
                 .product(name: "NIOWebSocket", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOTransportServices", package: "swift-nio-transport-services"),
-//                .product(name: "NIOExtras", package: "swift-nio-extras"),
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
                 .product(name: "NeedleTailLogger", package: "needletail-logger"),
                 .product(name: "Metrics", package: "swift-metrics"),
