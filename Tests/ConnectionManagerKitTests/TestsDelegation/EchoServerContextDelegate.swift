@@ -41,14 +41,29 @@ final class EchoServerContextDelegate: ChannelContextDelegate, @unchecked Sendab
         print("Echo server writer set for channel: \(context.id)")
     }
 
+    func waitForWriter(timeout: Duration = .seconds(5)) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if writer != nil {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return writer != nil
+    }
+
     func deliverInboundBuffer<Inbound: Sendable, Outbound: Sendable>(context: StreamContext<Inbound, Outbound>) async {
         // Echo the received message back to the client
         if let inboundBuffer = context.inbound as? ByteBuffer {
             print("Echo server received message for channel: \(context.id)")
             print("Echo server received: \(inboundBuffer)")
             if let writer = self.writer {
-                try! await writer.write(inboundBuffer)
-                print("Echo server sent back: \(inboundBuffer)")
+                do {
+                    try await writer.write(inboundBuffer)
+                    print("Echo server sent back: \(inboundBuffer)")
+                } catch {
+                    print("Echo server could not write response: \(error)")
+                }
             } else {
                 print("Echo server writer is nil!")
             }

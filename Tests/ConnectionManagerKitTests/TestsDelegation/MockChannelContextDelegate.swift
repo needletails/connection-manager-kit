@@ -12,9 +12,13 @@ import NIOExtras
 @testable import ConnectionManagerKit
 
 final class MockChannelContextDelegate: ChannelContextDelegate, @unchecked Sendable {
+    enum Errors: Error {
+        case writerUnavailable
+    }
     
     var responseStream = AsyncStream<ByteBuffer>.makeStream()
     var writer: NIOAsyncChannelOutboundWriter<ByteBuffer>?
+    nonisolated(unsafe) private var isChannelActive = false
     nonisolated(unsafe) var networkEventTask: Task<Void, Never>?
     nonisolated(unsafe) var inactiveTask: Task<Void, Never>?
     nonisolated(unsafe) var errorTask: Task<Void, Never>?
@@ -26,21 +30,12 @@ final class MockChannelContextDelegate: ChannelContextDelegate, @unchecked Senda
     func didShutdownChildChannel() async {}
     
     func channelActive(_ stream: AsyncStream<Void>, id: String) {
-#if !canImport(Network)
-        Task {
+        networkEventTask = Task {
             for await _ in stream.cancelOnGracefulShutdown() {
-                if !servers.isEmpty {
-                    try! await Task.sleep(until: .now + .milliseconds(500))
-                    for server in servers {
-                        let fc1 = await manager.connectionCache.findConnection(
-                            cacheKey: server.cacheKey)
-                        await #expect(fc1?.config.host == server.host)
-                        await manager.gracefulShutdown()
-                    }
-                }
+                isChannelActive = true
+                break
             }
         }
-#endif
     }
     
     func channelInactive(_ stream: AsyncStream<Void>, id: String) {
@@ -54,13 +49,37 @@ final class MockChannelContextDelegate: ChannelContextDelegate, @unchecked Senda
         self.writer = context.writer as? NIOAsyncChannelOutboundWriter<ByteBuffer>
     }
     
-    func send(_ buffer: ByteBuffer) async {
-        try! await writer?.write(buffer)
+    func send(_ buffer: ByteBuffer) async throws {
+        guard let writer else {
+            throw Errors.writerUnavailable
+        }
+        try await writer.write(buffer)
+    }
+
+    func waitForWriter(timeout: Duration = .seconds(5)) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if writer != nil {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return writer != nil
+    }
+
+    func waitForActiveChannel(timeout: Duration = .seconds(5)) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if isChannelActive {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return isChannelActive
     }
     
     func deliverInboundBuffer<Inbound: Sendable, Outbound: Sendable>(context: StreamContext<Inbound, Outbound>) async {
         responseStream.continuation.yield(context.inbound as! ByteBuffer)
-        let receivedMessage = (context.inbound as! ByteBuffer).getString(at: 0, length: (context.inbound as! ByteBuffer).readableBytes)
     }
     
     private func tearDown() async {

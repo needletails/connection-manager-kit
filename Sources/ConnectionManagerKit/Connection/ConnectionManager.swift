@@ -743,32 +743,33 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     ) async throws -> NIOAsyncChannel<Inbound, Outbound> {
         
 #if !canImport(Network)
-        func socketChannelCreator(tlsPreKeyed: TLSPreKeyedConfiguration? = nil) async throws -> NIOAsyncChannel<Inbound, Outbound> {
+        @Sendable func addClientTLSHandlerIfNeeded(
+            to channel: Channel,
+            server: ServerLocation,
+            tlsPreKeyed: TLSPreKeyedConfiguration?
+        ) throws {
+            guard server.enableTLS else { return }
+
+            let tlsConfiguration: TLSConfiguration
+            if let tlsPreKeyed {
+                tlsConfiguration = tlsPreKeyed.tlsConfiguration
+            } else {
+                var defaultTLSConfiguration = TLSConfiguration.makeClientConfiguration()
+                defaultTLSConfiguration.minimumTLSVersion = .tlsv13
+                defaultTLSConfiguration.maximumTLSVersion = .tlsv13
+                tlsConfiguration = defaultTLSConfiguration
+            }
+
+            let sslContext = try NIOSSLContext(configuration: tlsConfiguration)
+            let sslHandler = try NIOSSLClientHandler(context: sslContext, serverHostname: server.host)
+            try channel.pipeline.syncOperations.addHandler(sslHandler)
+        }
+
+        func socketChannelCreator() async throws -> NIOAsyncChannel<Inbound, Outbound> {
             let client = ClientBootstrap(group: group)
 
-            var tlsConfiguration: TLSConfiguration?
             if server.enableTLS {
                 logger.log(level: .info, message: "TLS enabled for connection to \(server.host):\(server.port)")
-                if let tlsPreKeyed {
-                    tlsConfiguration = tlsPreKeyed.tlsConfiguration
-                } else {
-                    tlsConfiguration = TLSConfiguration.makeClientConfiguration()
-                    tlsConfiguration?.minimumTLSVersion = .tlsv13
-                    tlsConfiguration?.maximumTLSVersion = .tlsv13
-                }
-
-                guard let tlsConfiguration = tlsConfiguration else {
-                    throw Errors.tlsNotConfigured
-                }
-                let sslContext = try NIOSSLContext(configuration: tlsConfiguration)
-                let bootstrap = try NIOClientTCPBootstrap(
-                    client,
-                    tls: NIOSSLClientTLSProvider(
-                        context: sslContext,
-                        serverHostname: server.host
-                    )
-                )
-                bootstrap.enableTLS()
             } else {
                 logger.log(level: .info, message: "TLS not enabled for connection to \(server.host):\(server.port)")
             }
@@ -852,6 +853,9 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         ) -> EventLoopFuture<EventLoopFuture<ConnectionManager<Inbound, Outbound>.UpgradeResult>> {
             let monitor = NetworkEventMonitor(connectionIdentifier: server.cacheKey)
             return channel.eventLoop.makeCompletedFuture {
+#if !canImport(Network)
+                try addClientTLSHandlerIfNeeded(to: channel, server: server, tlsPreKeyed: tlsPreKeyed)
+#endif
                 try channel.pipeline.syncOperations.addHandler(monitor)
                 if webSocketOptions == nil {
                     webSocketOptions = WebSocketOptions()
@@ -921,6 +925,9 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         @Sendable func createHandlers(_ channel: Channel, server: ServerLocation) -> EventLoopFuture<NIOAsyncChannel<Inbound, Outbound>> {
             let monitor = NetworkEventMonitor(connectionIdentifier: server.cacheKey)
             return channel.eventLoop.makeCompletedFuture {
+#if !canImport(Network)
+                try addClientTLSHandlerIfNeeded(to: channel, server: server, tlsPreKeyed: tlsPreKeyed)
+#endif
                 try channel.pipeline.syncOperations.addHandler(monitor)
                 if let channelHandlers = delegate?.retrieveChannelHandlers(), !channelHandlers.isEmpty {
                     try channel.pipeline.syncOperations.addHandlers(channelHandlers)

@@ -383,23 +383,25 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
     }
     
     private func stopTLS(from id: String) async {
-        if let childChannel = self.channelContexts.first(where: { $0.id == id })?.channel {
-            let stopPromise: EventLoopPromise<Void> = childChannel.channel.eventLoop.makePromise()
-            do {
-                let tlsHandler = try await childChannel.channel.pipeline.handler(type: NIOSSLServerHandler.self).get()
+        guard let childChannel = self.channelContexts.first(where: { $0.id == id })?.channel else {
+            return
+        }
+        let channel = childChannel.channel
+        let stopPromise: EventLoopPromise<Void> = channel.eventLoop.makePromise()
+
+        channel.pipeline.handler(type: NIOSSLServerHandler.self).whenComplete { result in
+            switch result {
+            case .success(let tlsHandler):
                 tlsHandler.stopTLS(promise: stopPromise)
-                stopPromise.futureResult.whenComplete { result in
-                    switch result {
-                    case .success(_):
-                        stopPromise.succeed()
-                    case .failure(let error):
-                        stopPromise.fail(error)
-                    }
-                }
-            } catch {
+            case .failure(let error):
                 stopPromise.fail(error)
-                logger.log(level: .trace, message: "There was a problem stopping TLS \(error)")
             }
+        }
+
+        do {
+            try await stopPromise.futureResult.get()
+        } catch {
+            logger.log(level: .trace, message: "There was a problem stopping TLS \(error)")
         }
     }
     

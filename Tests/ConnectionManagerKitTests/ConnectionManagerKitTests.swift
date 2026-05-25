@@ -65,6 +65,74 @@ struct ConnectionManagerKitTests {
         #expect(config.port == 6669)
     }
     
+    @Test("Listener recovery does not trigger for normal idle after clean disconnect")
+    func testListenerRecoveryDoesNotTriggerForCleanIdleState() {
+        let metrics = ListenerMetrics(
+            activeConnections: 0,
+            totalConnectionsAccepted: 1,
+            totalConnectionsClosed: 1,
+            recoveryAttempts: 0,
+            connectionErrors: 0
+        )
+        let configuration = ListenerConfiguration(maxRecoveryAttempts: 3)
+        
+        #expect(!ConnectionListener<ByteBuffer, ByteBuffer>.shouldAttemptRecovery(
+            metrics: metrics,
+            configuration: configuration
+        ))
+    }
+    
+    @Test("Listener recovery triggers only when idle state includes errors")
+    func testListenerRecoveryTriggersForErroredIdleState() {
+        let metrics = ListenerMetrics(
+            activeConnections: 0,
+            totalConnectionsAccepted: 1,
+            totalConnectionsClosed: 1,
+            recoveryAttempts: 0,
+            connectionErrors: 1
+        )
+        let configuration = ListenerConfiguration(maxRecoveryAttempts: 3)
+        
+        #expect(ConnectionListener<ByteBuffer, ByteBuffer>.shouldAttemptRecovery(
+            metrics: metrics,
+            configuration: configuration
+        ))
+    }
+    
+    @Test("Listener recovery does not trigger while errored listener still has active connections")
+    func testListenerRecoveryDoesNotTriggerWithActiveConnections() {
+        let metrics = ListenerMetrics(
+            activeConnections: 1,
+            totalConnectionsAccepted: 1,
+            totalConnectionsClosed: 0,
+            recoveryAttempts: 0,
+            connectionErrors: 1
+        )
+        let configuration = ListenerConfiguration(maxRecoveryAttempts: 3)
+        
+        #expect(!ConnectionListener<ByteBuffer, ByteBuffer>.shouldAttemptRecovery(
+            metrics: metrics,
+            configuration: configuration
+        ))
+    }
+    
+    @Test("Listener recovery does not trigger after max recovery attempts")
+    func testListenerRecoveryDoesNotTriggerAfterMaxAttempts() {
+        let metrics = ListenerMetrics(
+            activeConnections: 0,
+            totalConnectionsAccepted: 1,
+            totalConnectionsClosed: 1,
+            recoveryAttempts: 3,
+            connectionErrors: 1
+        )
+        let configuration = ListenerConfiguration(maxRecoveryAttempts: 3)
+        
+        #expect(!ConnectionListener<ByteBuffer, ByteBuffer>.shouldAttemptRecovery(
+            metrics: metrics,
+            configuration: configuration
+        ))
+    }
+    
     // MARK: - Optimized ConnectionListener Tests
     
     @Test("Listener should enforce max concurrent connections")
@@ -1741,7 +1809,7 @@ struct ConnectionManagerKitTests {
         // Start server
         let serverTask = Task {
             let config = try await listener.resolveAddress(
-                .init(group: serverGroup, host: "localhost", port: 6667))
+                .init(group: serverGroup, host: "localhost", port: 0))
             
             try await listener.listen(
                 address: config.address!,
@@ -1750,7 +1818,10 @@ struct ConnectionManagerKitTests {
                 listenerDelegate: listenerDelegation)
         }
         
-        try await Task.sleep(until: .now + .seconds(1))
+        let boundPort = try #require(
+            await listenerDelegation.waitForBoundPort(),
+            "Expected listener to bind before connecting echo client"
+        )
         
         let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
         let conformer = MockConnectionDelegate(manager: manager, listenerDelegation: nil)
@@ -1765,60 +1836,55 @@ struct ConnectionManagerKitTests {
         let servers = [
             ServerLocation(
                 host: endpoint,
-                port: 6667,
+                port: boundPort,
                 enableTLS: true,
                 cacheKey: "s1",
                 delegate: conformer,
                 contextDelegate: contextDelegate)
         ]
         
-        // Connect to servers
-        let connectionTask = Task {
-            try await manager.connect(
-                to: servers,
-                tlsPreKeyed: makeTestTLSPreKeyedConfig())
-        }
-        
-        try await Task.sleep(until: .now + .seconds(1))
-        
-        let connectionManagerDelegateTask = Task {
-            if let stream = connectionManagerDelegate.channelCreatedEvents["s1"] {
-                for await _ in stream {
-                    await manager.setDelegates(
-                        connectionDelegate: conformer,
-                        contextDelegate: contextDelegate,
-                        cacheKey: "s1")
-                    
-                    // Send message from client - properly encode the string
-                    let messageToSend = ByteBuffer(string: "Hello")
-                    await contextDelegate.send(messageToSend)
-                }
-            }
-        }
-        
-        // Wait for connection to be established
-        try await Task.sleep(until: .now + .seconds(1))
+        try await manager.connect(
+            to: servers,
+            tlsPreKeyed: makeTestTLSPreKeyedConfig()
+        )
+        #expect(await contextDelegate.waitForActiveChannel(), "Expected active client channel before sending echo message")
+        #expect(await contextDelegate.waitForWriter(), "Expected client writer before sending echo message")
+        #expect(await echoServerDelegate.waitForWriter(), "Expected echo server writer before sending echo message")
         
         // Set up client to listen for responses from its context delegate
-        let clientTask = Task {
-            for await response in contextDelegate.responseStream.stream {
-                // Decode the received message properly
-                let receivedMessage = response.getString(at: 0, length: response.readableBytes)
-                #expect(receivedMessage == "Hello")
-                contextDelegate.responseStream.continuation.finish()
+        let messageToSend = ByteBuffer(string: "Hello")
+        do {
+            try await contextDelegate.send(messageToSend)
+        } catch {
+            Issue.record("Send failed before echo could be observed: \(error)")
+            throw error
+        }
+
+        let response = await withTaskGroup(of: ByteBuffer?.self) { group in
+            group.addTask {
+                for await response in contextDelegate.responseStream.stream {
+                    contextDelegate.responseStream.continuation.finish()
+                    return response
+                }
+                return nil
             }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(5))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
         }
         
-        try await Task.sleep(until: .now + .seconds(1))
+        let receivedMessage = response.flatMap { $0.getString(at: 0, length: $0.readableBytes) }
+        #expect(receivedMessage == "Hello")
         
         // Cleanup
-        clientTask.cancel()
-        serverTask.cancel()
-        connectionTask.cancel()
-        connectionManagerDelegateTask.cancel()
         await manager.gracefulShutdown()
         await listener.serviceGroup?.triggerGracefulShutdown()
         try await Task.sleep(for: .milliseconds(150))
+        serverTask.cancel()
         
         // Verify that connections were attempted
         await #expect(manager.connectionCache.count >= 0)
