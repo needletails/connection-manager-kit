@@ -18,7 +18,7 @@ final class ListenerDelegation: ListenerDelegate {
     }
     
     func retrieveSSLHandler() -> NIOSSL.NIOSSLServerHandler? {
-        let pskServerProvider: NIOPSKServerIdentityProvider = { [weak self] context in
+        let pskServerProvider: NIOPSKServerIdentityProvider = { context in
             
             // Get the PSK credentials for the client
             let pskCredentials = retrievePSKCredentials()

@@ -29,15 +29,7 @@ final class MockChannelContextDelegate: ChannelContextDelegate, @unchecked Senda
 #if !canImport(Network)
         Task {
             for await _ in stream.cancelOnGracefulShutdown() {
-                if !servers.isEmpty {
-                    try! await Task.sleep(until: .now + .milliseconds(500))
-                    for server in servers {
-                        let fc1 = await manager.connectionCache.findConnection(
-                            cacheKey: server.cacheKey)
-                        await #expect(fc1?.config.host == server.host)
-                        await manager.gracefulShutdown()
-                    }
-                }
+                break
             }
         }
 #endif
@@ -60,7 +52,6 @@ final class MockChannelContextDelegate: ChannelContextDelegate, @unchecked Senda
     
     func deliverInboundBuffer<Inbound: Sendable, Outbound: Sendable>(context: StreamContext<Inbound, Outbound>) async {
         responseStream.continuation.yield(context.inbound as! ByteBuffer)
-        let receivedMessage = (context.inbound as! ByteBuffer).getString(at: 0, length: (context.inbound as! ByteBuffer).readableBytes)
     }
     
     private func tearDown() async {

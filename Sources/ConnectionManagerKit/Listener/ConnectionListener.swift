@@ -506,6 +506,3 @@ extension ConnectionListener: ChildChannelServiceDelegate {
         await delegate?.initializedChildChannel(context)
     }
 }
-
-extension NIOSSLServerHandler: @retroactive @unchecked Sendable {}
-
