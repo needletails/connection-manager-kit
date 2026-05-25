@@ -1859,7 +1859,11 @@ struct ConnectionManagerKitTests {
                     
                     // Send message from client - properly encode the string
                     let messageToSend = ByteBuffer(string: "Hello")
-                    await contextDelegate.send(messageToSend)
+                    do {
+                        try await contextDelegate.send(messageToSend)
+                    } catch {
+                        Issue.record("Failed to send echo test message: \(error)")
+                    }
                 }
             }
         }

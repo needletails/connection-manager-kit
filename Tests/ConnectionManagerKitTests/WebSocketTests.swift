@@ -20,7 +20,7 @@ final class WSServerListenerDelegate: ListenerDelegate {
     ) async {
         serverChannel = channel
         if shouldShutdown {
-            try! await channel.executeThenClose({ _, _ in })
+            try? await channel.executeThenClose({ _, _ in })
         }
     }
     

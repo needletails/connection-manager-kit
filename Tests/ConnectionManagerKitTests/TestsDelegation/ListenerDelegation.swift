@@ -71,7 +71,7 @@ final class ListenerDelegation: ListenerDelegate {
     ) async {
         serverChannelAny = channel
         if shouldShutdown {
-            try! await channel.executeThenClose({ _, _ in })
+            try? await channel.executeThenClose({ _, _ in })
         }
     }
     

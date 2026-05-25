@@ -12,6 +12,9 @@ import NIOExtras
 @testable import ConnectionManagerKit
 
 final class MockChannelContextDelegate: ChannelContextDelegate, @unchecked Sendable {
+    enum Errors: Error {
+        case writerUnavailable
+    }
     
     var responseStream = AsyncStream<ByteBuffer>.makeStream()
     var writer: NIOAsyncChannelOutboundWriter<ByteBuffer>?
@@ -46,8 +49,11 @@ final class MockChannelContextDelegate: ChannelContextDelegate, @unchecked Senda
         self.writer = context.writer as? NIOAsyncChannelOutboundWriter<ByteBuffer>
     }
     
-    func send(_ buffer: ByteBuffer) async {
-        try! await writer?.write(buffer)
+    func send(_ buffer: ByteBuffer) async throws {
+        guard let writer else {
+            throw Errors.writerUnavailable
+        }
+        try await writer.write(buffer)
     }
     
     func deliverInboundBuffer<Inbound: Sendable, Outbound: Sendable>(context: StreamContext<Inbound, Outbound>) async {
