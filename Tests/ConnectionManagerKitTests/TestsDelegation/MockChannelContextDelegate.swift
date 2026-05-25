@@ -55,6 +55,17 @@ final class MockChannelContextDelegate: ChannelContextDelegate, @unchecked Senda
         }
         try await writer.write(buffer)
     }
+
+    func waitForWriter(timeout: Duration = .seconds(5)) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if writer != nil {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return writer != nil
+    }
     
     func deliverInboundBuffer<Inbound: Sendable, Outbound: Sendable>(context: StreamContext<Inbound, Outbound>) async {
         responseStream.continuation.yield(context.inbound as! ByteBuffer)

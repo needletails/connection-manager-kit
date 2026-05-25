@@ -1840,54 +1840,38 @@ struct ConnectionManagerKitTests {
                 contextDelegate: contextDelegate)
         ]
         
-        // Connect to servers
-        let connectionTask = Task {
-            try await manager.connect(
-                to: servers,
-                tlsPreKeyed: makeTestTLSPreKeyedConfig())
-        }
-        
-        try await Task.sleep(until: .now + .seconds(1))
-        
-        let connectionManagerDelegateTask = Task {
-            if let stream = connectionManagerDelegate.channelCreatedEvents["s1"] {
-                for await _ in stream {
-                    await manager.setDelegates(
-                        connectionDelegate: conformer,
-                        contextDelegate: contextDelegate,
-                        cacheKey: "s1")
-                    
-                    // Send message from client - properly encode the string
-                    let messageToSend = ByteBuffer(string: "Hello")
-                    do {
-                        try await contextDelegate.send(messageToSend)
-                    } catch {
-                        Issue.record("Failed to send echo test message: \(error)")
-                    }
-                }
-            }
-        }
-        
-        // Wait for connection to be established
-        try await Task.sleep(until: .now + .seconds(1))
+        try await manager.connect(
+            to: servers,
+            tlsPreKeyed: makeTestTLSPreKeyedConfig()
+        )
+        #expect(await contextDelegate.waitForWriter(), "Expected client writer before sending echo message")
         
         // Set up client to listen for responses from its context delegate
-        let clientTask = Task {
-            for await response in contextDelegate.responseStream.stream {
-                // Decode the received message properly
-                let receivedMessage = response.getString(at: 0, length: response.readableBytes)
-                #expect(receivedMessage == "Hello")
-                contextDelegate.responseStream.continuation.finish()
+        let messageToSend = ByteBuffer(string: "Hello")
+        try await contextDelegate.send(messageToSend)
+
+        let response = await withTaskGroup(of: ByteBuffer?.self) { group in
+            group.addTask {
+                for await response in contextDelegate.responseStream.stream {
+                    contextDelegate.responseStream.continuation.finish()
+                    return response
+                }
+                return nil
             }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(5))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
         }
         
-        try await Task.sleep(until: .now + .seconds(1))
+        let receivedMessage = response.flatMap { $0.getString(at: 0, length: $0.readableBytes) }
+        #expect(receivedMessage == "Hello")
         
         // Cleanup
-        clientTask.cancel()
         serverTask.cancel()
-        connectionTask.cancel()
-        connectionManagerDelegateTask.cancel()
         await manager.gracefulShutdown()
         await listener.serviceGroup?.triggerGracefulShutdown()
         try await Task.sleep(for: .milliseconds(150))
