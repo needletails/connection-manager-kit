@@ -70,6 +70,7 @@ final class ListenerDelegation: ListenerDelegate {
         channel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>
     ) async {
         serverChannelAny = channel
+        boundPort = channel.channel.localAddress?.port
         if shouldShutdown {
             try? await channel.executeThenClose({ _, _ in })
         }
@@ -77,8 +78,20 @@ final class ListenerDelegation: ListenerDelegate {
     
     let shouldShutdown: Bool
     nonisolated(unsafe) var serverChannelAny: Any?
+    nonisolated(unsafe) var boundPort: Int?
     
     init(shouldShutdown: Bool) {
         self.shouldShutdown = shouldShutdown
+    }
+
+    func waitForBoundPort(timeout: Duration = .seconds(5)) async -> Int? {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if let boundPort {
+                return boundPort
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return boundPort
     }
 }

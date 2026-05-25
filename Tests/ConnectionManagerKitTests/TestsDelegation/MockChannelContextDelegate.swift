@@ -18,6 +18,7 @@ final class MockChannelContextDelegate: ChannelContextDelegate, @unchecked Senda
     
     var responseStream = AsyncStream<ByteBuffer>.makeStream()
     var writer: NIOAsyncChannelOutboundWriter<ByteBuffer>?
+    nonisolated(unsafe) private var isChannelActive = false
     nonisolated(unsafe) var networkEventTask: Task<Void, Never>?
     nonisolated(unsafe) var inactiveTask: Task<Void, Never>?
     nonisolated(unsafe) var errorTask: Task<Void, Never>?
@@ -29,13 +30,12 @@ final class MockChannelContextDelegate: ChannelContextDelegate, @unchecked Senda
     func didShutdownChildChannel() async {}
     
     func channelActive(_ stream: AsyncStream<Void>, id: String) {
-#if !canImport(Network)
-        Task {
+        networkEventTask = Task {
             for await _ in stream.cancelOnGracefulShutdown() {
+                isChannelActive = true
                 break
             }
         }
-#endif
     }
     
     func channelInactive(_ stream: AsyncStream<Void>, id: String) {
@@ -65,6 +65,17 @@ final class MockChannelContextDelegate: ChannelContextDelegate, @unchecked Senda
             try? await Task.sleep(for: .milliseconds(50))
         }
         return writer != nil
+    }
+
+    func waitForActiveChannel(timeout: Duration = .seconds(5)) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if isChannelActive {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return isChannelActive
     }
     
     func deliverInboundBuffer<Inbound: Sendable, Outbound: Sendable>(context: StreamContext<Inbound, Outbound>) async {

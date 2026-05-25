@@ -1809,7 +1809,7 @@ struct ConnectionManagerKitTests {
         // Start server
         let serverTask = Task {
             let config = try await listener.resolveAddress(
-                .init(group: serverGroup, host: "localhost", port: 6667))
+                .init(group: serverGroup, host: "localhost", port: 0))
             
             try await listener.listen(
                 address: config.address!,
@@ -1818,7 +1818,10 @@ struct ConnectionManagerKitTests {
                 listenerDelegate: listenerDelegation)
         }
         
-        try await Task.sleep(until: .now + .seconds(1))
+        let boundPort = try #require(
+            await listenerDelegation.waitForBoundPort(),
+            "Expected listener to bind before connecting echo client"
+        )
         
         let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
         let conformer = MockConnectionDelegate(manager: manager, listenerDelegation: nil)
@@ -1833,7 +1836,7 @@ struct ConnectionManagerKitTests {
         let servers = [
             ServerLocation(
                 host: endpoint,
-                port: 6667,
+                port: boundPort,
                 enableTLS: true,
                 cacheKey: "s1",
                 delegate: conformer,
@@ -1844,11 +1847,18 @@ struct ConnectionManagerKitTests {
             to: servers,
             tlsPreKeyed: makeTestTLSPreKeyedConfig()
         )
+        #expect(await contextDelegate.waitForActiveChannel(), "Expected active client channel before sending echo message")
         #expect(await contextDelegate.waitForWriter(), "Expected client writer before sending echo message")
+        #expect(await echoServerDelegate.waitForWriter(), "Expected echo server writer before sending echo message")
         
         // Set up client to listen for responses from its context delegate
         let messageToSend = ByteBuffer(string: "Hello")
-        try await contextDelegate.send(messageToSend)
+        do {
+            try await contextDelegate.send(messageToSend)
+        } catch {
+            Issue.record("Send failed before echo could be observed: \(error)")
+            throw error
+        }
 
         let response = await withTaskGroup(of: ByteBuffer?.self) { group in
             group.addTask {
@@ -1871,10 +1881,10 @@ struct ConnectionManagerKitTests {
         #expect(receivedMessage == "Hello")
         
         // Cleanup
-        serverTask.cancel()
         await manager.gracefulShutdown()
         await listener.serviceGroup?.triggerGracefulShutdown()
         try await Task.sleep(for: .milliseconds(150))
+        serverTask.cancel()
         
         // Verify that connections were attempted
         await #expect(manager.connectionCache.count >= 0)
