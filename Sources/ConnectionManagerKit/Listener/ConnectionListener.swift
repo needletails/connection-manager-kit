@@ -333,25 +333,24 @@ public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceL
                 
                 if isShuttingDown || recoveryAttempts >= maxAttempts { break }
                 
-                // Monitor for potential issues and attempt recovery
+                // Monitor for listener-level issues and attempt recovery
                 if await self.shouldAttemptRecovery() {
                     recoveryAttempts += 1
                     
-                    // Update Swift Metrics
-                    self.recoveryAttemptsCounter.increment()
+                    await self.recordRecoveryAttempt(recoveryAttempts)
                     
                     // Notify delegate
                     await self.metricsDelegate?.recoveryDidAttempt(attemptNumber: recoveryAttempts, maxAttempts: maxAttempts)
                     await self.metricsDelegate?.listenerMetricsDidUpdate(await self.metrics)
                     
-                    self.logger.log(level: .warning, message: "Attempting listener recovery (attempt \(recoveryAttempts)/\(maxAttempts))")
+                    self.logger.log(level: .warning, message: "Listener health check triggered after connection error (attempt \(recoveryAttempts)/\(maxAttempts))")
                     
                     do {
                         try await self.performRecovery()
-                        self.logger.log(level: .info, message: "Listener recovery successful")
+                        self.logger.log(level: .info, message: "Listener health check completed")
                         break
                     } catch {
-                        self.logger.log(level: .error, message: "Listener recovery failed: \(error)")
+                        self.logger.log(level: .error, message: "Listener health check failed: \(error)")
                         
                         if recoveryAttempts < maxAttempts {
                             let recoveryDelay = self.configuration.recoveryDelay
@@ -367,30 +366,29 @@ public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceL
             // Log when recovery task exits
             let finalIsShuttingDown = await self.isShuttingDown
             if finalIsShuttingDown {
-                self.logger.log(level: .debug, message: "Recovery task stopped due to shutdown")
+                self.logger.log(level: .debug, message: "Listener health monitor stopped due to shutdown")
             } else {
-                self.logger.log(level: .debug, message: "Recovery task stopped after \(recoveryAttempts) attempts")
+                self.logger.log(level: .debug, message: "Listener health monitor stopped after \(recoveryAttempts) attempts")
             }
         }
     }
     
     private func shouldAttemptRecovery() async -> Bool {
-        // Check if recovery is needed based on metrics
-        let currentMetrics = metrics
-        
-        // Recovery triggers:
-        // 1. High error rate
-        // 2. No connections being accepted
-        // 3. Memory pressure (if we had memory monitoring)
-        
-        return currentMetrics.activeConnections == 0 && 
-               currentMetrics.totalConnectionsAccepted > 0 &&
-               currentMetrics.recoveryAttempts < configuration.maxRecoveryAttempts
+        Self.shouldAttemptRecovery(metrics: metrics, configuration: configuration)
+    }
+    
+    static func shouldAttemptRecovery(metrics: ListenerMetrics, configuration: ListenerConfiguration) -> Bool {
+        // A listener that has cleanly closed all child connections is healthy and idle.
+        // Recovery is reserved for actual listener/connection error signals.
+        metrics.connectionErrors > 0 &&
+        metrics.activeConnections == 0 &&
+        metrics.totalConnectionsAccepted > 0 &&
+        metrics.recoveryAttempts < configuration.maxRecoveryAttempts
     }
     
     private func performRecovery() async throws {
-        // Recovery logic would be implemented here based on specific requirements
-        logger.log(level: .info, message: "Performing listener recovery")
+        // Placeholder for future listener restart/rebind work. Today this is a health check.
+        logger.log(level: .info, message: "Performing listener health check")
     }
     
     private func updateMetricsOnConnectionAccept(id: String) {
@@ -467,6 +465,13 @@ public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceL
         
         // Notify delegate
         metricsDelegate?.listenerMetricsDidUpdate(metrics)
+    }
+    
+    private func recordRecoveryAttempt(_ attemptNumber: Int) {
+        metrics.recoveryAttempts = attemptNumber
+        
+        // Update Swift Metrics
+        recoveryAttemptsCounter.increment()
     }
     
     /// Returns current metrics for consumer logging/processing

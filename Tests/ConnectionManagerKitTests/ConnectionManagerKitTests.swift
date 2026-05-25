@@ -65,6 +65,74 @@ struct ConnectionManagerKitTests {
         #expect(config.port == 6669)
     }
     
+    @Test("Listener recovery does not trigger for normal idle after clean disconnect")
+    func testListenerRecoveryDoesNotTriggerForCleanIdleState() {
+        let metrics = ListenerMetrics(
+            activeConnections: 0,
+            totalConnectionsAccepted: 1,
+            totalConnectionsClosed: 1,
+            recoveryAttempts: 0,
+            connectionErrors: 0
+        )
+        let configuration = ListenerConfiguration(maxRecoveryAttempts: 3)
+        
+        #expect(!ConnectionListener<ByteBuffer, ByteBuffer>.shouldAttemptRecovery(
+            metrics: metrics,
+            configuration: configuration
+        ))
+    }
+    
+    @Test("Listener recovery triggers only when idle state includes errors")
+    func testListenerRecoveryTriggersForErroredIdleState() {
+        let metrics = ListenerMetrics(
+            activeConnections: 0,
+            totalConnectionsAccepted: 1,
+            totalConnectionsClosed: 1,
+            recoveryAttempts: 0,
+            connectionErrors: 1
+        )
+        let configuration = ListenerConfiguration(maxRecoveryAttempts: 3)
+        
+        #expect(ConnectionListener<ByteBuffer, ByteBuffer>.shouldAttemptRecovery(
+            metrics: metrics,
+            configuration: configuration
+        ))
+    }
+    
+    @Test("Listener recovery does not trigger while errored listener still has active connections")
+    func testListenerRecoveryDoesNotTriggerWithActiveConnections() {
+        let metrics = ListenerMetrics(
+            activeConnections: 1,
+            totalConnectionsAccepted: 1,
+            totalConnectionsClosed: 0,
+            recoveryAttempts: 0,
+            connectionErrors: 1
+        )
+        let configuration = ListenerConfiguration(maxRecoveryAttempts: 3)
+        
+        #expect(!ConnectionListener<ByteBuffer, ByteBuffer>.shouldAttemptRecovery(
+            metrics: metrics,
+            configuration: configuration
+        ))
+    }
+    
+    @Test("Listener recovery does not trigger after max recovery attempts")
+    func testListenerRecoveryDoesNotTriggerAfterMaxAttempts() {
+        let metrics = ListenerMetrics(
+            activeConnections: 0,
+            totalConnectionsAccepted: 1,
+            totalConnectionsClosed: 1,
+            recoveryAttempts: 3,
+            connectionErrors: 1
+        )
+        let configuration = ListenerConfiguration(maxRecoveryAttempts: 3)
+        
+        #expect(!ConnectionListener<ByteBuffer, ByteBuffer>.shouldAttemptRecovery(
+            metrics: metrics,
+            configuration: configuration
+        ))
+    }
+    
     // MARK: - Optimized ConnectionListener Tests
     
     @Test("Listener should enforce max concurrent connections")
