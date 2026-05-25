@@ -743,7 +743,11 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     ) async throws -> NIOAsyncChannel<Inbound, Outbound> {
         
 #if !canImport(Network)
-        func addClientTLSHandlerIfNeeded(to channel: Channel, server: ServerLocation) throws {
+        @Sendable func addClientTLSHandlerIfNeeded(
+            to channel: Channel,
+            server: ServerLocation,
+            tlsPreKeyed: TLSPreKeyedConfiguration?
+        ) throws {
             guard server.enableTLS else { return }
 
             let tlsConfiguration: TLSConfiguration
@@ -850,7 +854,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
             let monitor = NetworkEventMonitor(connectionIdentifier: server.cacheKey)
             return channel.eventLoop.makeCompletedFuture {
 #if !canImport(Network)
-                try addClientTLSHandlerIfNeeded(to: channel, server: server)
+                try addClientTLSHandlerIfNeeded(to: channel, server: server, tlsPreKeyed: tlsPreKeyed)
 #endif
                 try channel.pipeline.syncOperations.addHandler(monitor)
                 if webSocketOptions == nil {
@@ -922,7 +926,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
             let monitor = NetworkEventMonitor(connectionIdentifier: server.cacheKey)
             return channel.eventLoop.makeCompletedFuture {
 #if !canImport(Network)
-                try addClientTLSHandlerIfNeeded(to: channel, server: server)
+                try addClientTLSHandlerIfNeeded(to: channel, server: server, tlsPreKeyed: tlsPreKeyed)
 #endif
                 try channel.pipeline.syncOperations.addHandler(monitor)
                 if let channelHandlers = delegate?.retrieveChannelHandlers(), !channelHandlers.isEmpty {
