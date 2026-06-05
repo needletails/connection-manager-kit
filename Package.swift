@@ -23,7 +23,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.1"),
         .package(url: "https://github.com/apple/swift-nio-transport-services.git", from: "1.19.0"),
         .package(url: "https://github.com/apple/swift-nio-extras.git", from: "1.13.0"),
-        .package(url: "https://github.com/needletails/needletail-logger.git", from: "3.1.3"),
+        .package(url: "https://github.com/needletails/needletail-logger.git", from: "3.1.5"),
         .package(url: "https://github.com/apple/swift-metrics.git", from: "2.4.1"),
         .package(url: "https://github.com/needletails/swift-crypto.git", branch: "trait/force-build-swift-crypto-api")
     ],
