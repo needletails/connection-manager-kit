@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.3
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
@@ -18,14 +18,14 @@ let package = Package(
             targets: ["ConnectionManagerKit"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.6.2"),
-        .package(url: "https://github.com/apple/swift-nio.git", from: "2.71.0"),
-        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.1"),
-        .package(url: "https://github.com/apple/swift-nio-transport-services.git", from: "1.19.0"),
-        .package(url: "https://github.com/apple/swift-nio-extras.git", from: "1.13.0"),
-        .package(url: "https://github.com/needletails/needletail-logger.git", from: "3.1.5"),
-        .package(url: "https://github.com/apple/swift-metrics.git", from: "2.4.1"),
-        .package(url: "https://github.com/needletails/swift-crypto.git", branch: "trait/force-build-swift-crypto-api")
+        .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.11.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.101.3"),
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.37.2"),
+        .package(url: "https://github.com/apple/swift-nio-transport-services.git", from: "1.28.0"),
+        .package(url: "https://github.com/apple/swift-nio-extras.git", .upToNextMinor(from: "1.26.0")),
+        .package(url: "https://github.com/needletails/needletail-logger.git", from: "3.2.0"),
+        .package(url: "https://github.com/apple/swift-metrics.git", from: "2.11.0"),
+        .package(url: "https://github.com/needletails/swift-crypto.git", from: "1.1.4", traits: ["FORCE_BUILD_SWIFT_CRYPTO_API"])
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.

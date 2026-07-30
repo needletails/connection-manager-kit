@@ -130,6 +130,13 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
     private var activeConnections = 0
     private var maxConnectionsReached = false
     private var maxConcurrentConnections: Int = 1000
+
+#if DEBUG
+    /// Test seam: increments when inbound/writer delivery finds no context delegate.
+    var missingContextDelegateDropCount: Int = 0
+
+    func configuredMaxConcurrentConnections() -> Int { maxConcurrentConnections }
+#endif
     
     // Performance monitoring
     private var connectionMetrics: [String: ConnectionMetrics] = [:]
@@ -149,7 +156,8 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
         logger: NeedleTailLogger,
         delegate: ChildChannelServiceDelegate,
         listenerDelegate: ListenerDelegate?,
-        serviceListenerDelegate: ServiceListenerDelegate?
+        serviceListenerDelegate: ServiceListenerDelegate?,
+        maxConcurrentConnections: Int = 1000
     ) {
         if let websocketConfiguration {
             self.createWebsocketServer = true
@@ -161,6 +169,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
         self.delegate = delegate
         self.listenerDelegate = listenerDelegate
         self.serviceListenerDelegate = serviceListenerDelegate
+        self.maxConcurrentConnections = maxConcurrentConnections
         
         // Start cleanup task
         Task { [weak self] in
@@ -407,12 +416,24 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
     
     func shutdownChildChannel(id: String) async {
         await self.stopTLS(from: id)
+        if let context = channelContexts.first(where: { $0.id == id }) {
+            try? await context.channel.channel.close()
+        }
         self.inboundContinuations[id]?.finish()
         self.outboundContinuations[id]?.finish()
         self.inboundContinuations.removeValue(forKey: id)
         self.outboundContinuations.removeValue(forKey: id)
         self.channelContexts.removeAll(where: { $0.id == id })
         self.contextDelegates.removeValue(forKey: id)
+    }
+
+    private func noteMissingContextDelegateDrop(channelId: String, path: String) {
+#if DEBUG
+        missingContextDelegateDropCount += 1
+#endif
+        logger.log(level: .error, message: "No context delegate for child channel; dropping \(path)", metadata: [
+            "channelId": "\(channelId)"
+        ])
     }
     
     func shutdown() async throws {
@@ -490,21 +511,23 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                                 writer: writer)
                             if let contextDelegate = await contextDelegates[channelId.uuidString] {
                                 await contextDelegate.deliverWriter(context: writerContext)
+                            } else {
+                                await noteMissingContextDelegateDrop(channelId: channelId.uuidString, path: "writer")
                             }
                         }
                     }
                     
                     for await stream in _inbound {
+                        // Serial in-order delivery per connection (do not parallelize messages).
                         for try await inbound in stream.cancelOnGracefulShutdown() {
-                            group.addTask { [weak self] in
-                                guard let self else { return }
-                                let streamContext = StreamContext(
-                                    id: channelId.uuidString,
-                                    channel: childChannel,
-                                    inbound: inbound)
-                                if let contextDelegate = await contextDelegates[channelId.uuidString] {
-                                    await contextDelegate.deliverInboundBuffer(context: streamContext)
-                                }
+                            let streamContext = StreamContext(
+                                id: channelId.uuidString,
+                                channel: childChannel,
+                                inbound: inbound)
+                            if let contextDelegate = await contextDelegates[channelId.uuidString] {
+                                await contextDelegate.deliverInboundBuffer(context: streamContext)
+                            } else {
+                                await noteMissingContextDelegateDrop(channelId: channelId.uuidString, path: "inbound")
                             }
                         }
                         inboundContinuation.finish()
@@ -522,6 +545,8 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                     outbound.finish()
                     if let contextDelegate = await contextDelegates[channelId.uuidString] {
                         await contextDelegate.reportChildChannel(error: error, id: channelId.uuidString)
+                    } else {
+                        await noteMissingContextDelegateDrop(channelId: channelId.uuidString, path: "error")
                     }
                 }
             }
