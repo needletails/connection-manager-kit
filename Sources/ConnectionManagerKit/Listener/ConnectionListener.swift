@@ -163,6 +163,18 @@ public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceL
     public func setContextDelegate(_ delegate: ChannelContextDelegate, key: String) async {
         await serverService?.setContextDelegate(delegate, key: key)
     }
+
+#if DEBUG
+    /// Test seam for nil-delegate drop observability.
+    func missingContextDelegateDropCount() async -> Int {
+        await serverService?.missingContextDelegateDropCount ?? 0
+    }
+
+    /// Test seam: ServerService's enforced connection cap (should match ListenerConfiguration).
+    func configuredMaxConcurrentConnections() async -> Int? {
+        await serverService?.configuredMaxConcurrentConnections()
+    }
+#endif
     
     public init(
         logger: NeedleTailLogger = NeedleTailLogger("[Connection Listener]"),
@@ -234,7 +246,8 @@ public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceL
             logger: logger,
             delegate: self,
             listenerDelegate: listenerDelegate,
-            serviceListenerDelegate: self)
+            serviceListenerDelegate: self,
+            maxConcurrentConnections: self.configuration.maxConcurrentConnections)
         
         try await runListener(serverService: serverService)
     }
@@ -259,7 +272,8 @@ public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceL
             logger: logger,
             delegate: self,
             listenerDelegate: listenerDelegate,
-            serviceListenerDelegate: self)
+            serviceListenerDelegate: self,
+            maxConcurrentConnections: self.configuration.maxConcurrentConnections)
         try await runListener(serverService: serverService)
     }
     
