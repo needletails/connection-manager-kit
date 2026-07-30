@@ -130,13 +130,6 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
     private var activeConnections = 0
     private var maxConnectionsReached = false
     private var maxConcurrentConnections: Int = 1000
-
-#if DEBUG
-    /// Test seam: increments when inbound/writer delivery finds no context delegate.
-    var missingContextDelegateDropCount: Int = 0
-
-    func configuredMaxConcurrentConnections() -> Int { maxConcurrentConnections }
-#endif
     
     // Performance monitoring
     private var connectionMetrics: [String: ConnectionMetrics] = [:]
@@ -428,9 +421,6 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
     }
 
     private func noteMissingContextDelegateDrop(channelId: String, path: String) {
-#if DEBUG
-        missingContextDelegateDropCount += 1
-#endif
         logger.log(level: .error, message: "No context delegate for child channel; dropping \(path)", metadata: [
             "channelId": "\(channelId)"
         ])
