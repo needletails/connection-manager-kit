@@ -25,7 +25,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-extras.git", .upToNextMinor(from: "1.26.0")),
         .package(url: "https://github.com/needletails/needletail-logger.git", from: "3.2.0"),
         .package(url: "https://github.com/apple/swift-metrics.git", from: "2.11.0"),
-        .package(url: "https://github.com/needletails/swift-crypto.git", from: "1.1.4", traits: ["FORCE_BUILD_SWIFT_CRYPTO_API"])
+        .package(url: "https://github.com/needletails/swift-crypto.git", from: "1.1.4")
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
