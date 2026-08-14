@@ -406,17 +406,29 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         }
     }
     
+    /// TCP options applied to every connection this manager creates. Empty by
+    /// default (kernel defaults); adopters opt in, e.g. `.deadPeerDetection()`.
+    private let transportOptions: TCPTransportOptions
+    
     /// Initializes a new `ConnectionManager` instance.
     ///
-    /// - Parameter logger: The logger instance to use for logging connection events.
-    ///   Defaults to a new `NeedleTailLogger` instance.
+    /// - Parameters:
+    ///   - logger: The logger instance to use for logging connection events.
+    ///     Defaults to a new `NeedleTailLogger` instance.
+    ///   - transportOptions: TCP options applied to every connection this
+    ///     manager creates. Defaults to none (kernel defaults); pass
+    ///     `.deadPeerDetection()` or custom options to opt in.
     ///
     /// ## Example
     /// ```swift
     /// let manager = ConnectionManager<ByteBuffer, ByteBuffer>(logger: NeedleTailLogger())
     /// ```
-    public init(logger: NeedleTailLogger = NeedleTailLogger()) {
+    public init(
+        logger: NeedleTailLogger = NeedleTailLogger(),
+        transportOptions: TCPTransportOptions = .init()
+    ) {
         self.logger = logger
+        self.transportOptions = transportOptions
         self.connectionCache = ConnectionCache<Inbound, Outbound>(logger: logger)
 #if canImport(Network)
         self.group = NIOTSEventLoopGroup.singleton
@@ -766,7 +778,16 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         }
 
         func socketChannelCreator() async throws -> NIOAsyncChannel<Inbound, Outbound> {
-            let client = ClientBootstrap(group: group)
+            var client = ClientBootstrap(group: group)
+            // Adopter-supplied TCP options (e.g. dead-peer detection). Applied
+            // to the shared bootstrap so both the websocket-upgrade and plain
+            // TCP branches get them.
+            for option in transportOptions.socketOptions {
+                client = client.channelOption(
+                    ChannelOptions.socket(
+                        SocketOptionLevel(option.level), SocketOptionName(option.name)),
+                    value: SocketOptionValue(option.value))
+            }
 
             if server.enableTLS {
                 logger.log(level: .info, message: "TLS enabled for connection to \(server.host):\(server.port)")
@@ -802,6 +823,8 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
 #if canImport(Network)
         var connection = NIOTSConnectionBootstrap(group: group)
         let tcpOptions = NWProtocolTCP.Options()
+        // Adopter-supplied TCP tuning (e.g. dead-peer detection).
+        transportOptions.configureNWTCPOptions?(tcpOptions)
         connection = connection.tcpOptions(tcpOptions)
         
         if server.enableTLS {

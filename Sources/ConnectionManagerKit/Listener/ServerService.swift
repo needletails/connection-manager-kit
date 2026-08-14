@@ -221,8 +221,27 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
         }
     }
 
+    /// Applies adopter-supplied TCP options to accepted child channels
+    /// (`Configuration.transportOptions`), e.g. dead-peer detection so a
+    /// client whose path silently died does not keep a "registered" session
+    /// with a live writer — traffic routed to such a session bypasses
+    /// offline spooling.
+    private static func withTransportOptions(
+        _ bootstrap: ServerBootstrap,
+        options: TCPTransportOptions
+    ) -> ServerBootstrap {
+        var bootstrap = bootstrap
+        for option in options.socketOptions {
+            bootstrap = bootstrap.childChannelOption(
+                ChannelOptions.socket(
+                    SocketOptionLevel(option.level), SocketOptionName(option.name)),
+                value: SocketOptionValue(option.value))
+        }
+        return bootstrap
+    }
+
     private func createWebSocketChannel() async throws -> NIOAsyncChannel<EventLoopFuture<NIOAsyncChannel<Inbound, Outbound>>, Never> {
-        return try await ServerBootstrap(group: configuration.group)
+        return try await Self.withTransportOptions(ServerBootstrap(group: configuration.group)
         // Optimized server channel options
             .serverChannelOption(ChannelOptions.backlog, value: Int32(configuration.backlog))
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -230,7 +249,8 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
             .childChannelOption(ChannelOptions.socket(IPPROTO_TCP, TCP_NODELAY), value: 1)
             .childChannelOption(ChannelOptions.socketOption(.so_keepalive), value: 1)
             .childChannelOption(ChannelOptions.recvAllocator, value: AdaptiveRecvByteBufferAllocator())
-            .childChannelOption(ChannelOptions.autoRead, value: true)
+            .childChannelOption(ChannelOptions.autoRead, value: true),
+            options: configuration.transportOptions)
             .bind(to: address, childChannelInitializer: { [weak self] channel in
                 guard let self else {
                     return channel.eventLoop.makeFailedFuture(ServerServiceErrors.websocketUpgradeFailed)
@@ -241,7 +261,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
     }
     
     private func createTCPServerChannel() async throws -> NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never> {
-        return try await ServerBootstrap(group: configuration.group)
+        return try await Self.withTransportOptions(ServerBootstrap(group: configuration.group)
         // Optimized server channel options
             .serverChannelOption(ChannelOptions.backlog, value: Int32(configuration.backlog))
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -249,7 +269,8 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
             .childChannelOption(ChannelOptions.socket(IPPROTO_TCP, TCP_NODELAY), value: 1)
             .childChannelOption(ChannelOptions.socketOption(.so_keepalive), value: 1)
             .childChannelOption(ChannelOptions.recvAllocator, value: AdaptiveRecvByteBufferAllocator())
-            .childChannelOption(ChannelOptions.autoRead, value: true)
+            .childChannelOption(ChannelOptions.autoRead, value: true),
+            options: configuration.transportOptions)
             .bind(to: address, childChannelInitializer: { channel in
                 channel.eventLoop.makeCompletedFuture {
                     if let sslHandler = self.serviceListenerDelegate?.retrieveSSLHandler() {

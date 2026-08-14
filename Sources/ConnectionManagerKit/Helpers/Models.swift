@@ -15,6 +15,9 @@
 import Foundation
 import NIOCore
 import NIOHTTP1
+#if canImport(Network)
+import Network
+#endif
 
 /// A context object that provides access to a channel and its associated metadata.
 ///
@@ -199,6 +202,142 @@ public struct WebSocketOptions: Sendable {
 }
 
 
+/// A single POSIX socket option `(level, name, value)` applied verbatim to
+/// NIO channels via `ChannelOptions.socket(level, name)`.
+public struct TCPSocketOption: Sendable {
+    /// The protocol level (e.g. `SOL_SOCKET`, `IPPROTO_TCP`).
+    public var level: CInt
+    /// The option name (e.g. `SO_KEEPALIVE`, `TCP_NODELAY`).
+    public var name: CInt
+    /// The option value.
+    public var value: CInt
+
+    public init(level: CInt, name: CInt, value: CInt) {
+        self.level = level
+        self.name = name
+        self.value = value
+    }
+}
+
+/// Adopter-supplied TCP tuning, passed through verbatim to the underlying
+/// transport. ConnectionManagerKit applies no TCP tuning of its own; adopters
+/// opt in by passing options here.
+///
+/// Two backends exist, and each only consumes the part that applies to it:
+/// - POSIX NIO bootstraps (`ClientBootstrap` on non-Apple platforms, and
+///   `ServerBootstrap` child channels everywhere) apply `socketOptions`.
+/// - Network.framework (`NIOTSConnectionBootstrap` on Apple platforms) invokes
+///   `configureNWTCPOptions` with the `NWProtocolTCP.Options` used to connect.
+public struct TCPTransportOptions: Sendable {
+    /// Socket options applied to POSIX NIO channels (client connections on
+    /// non-Apple platforms; accepted server child channels on all platforms).
+    public var socketOptions: [TCPSocketOption]
+
+#if canImport(Network)
+    /// Configures the `NWProtocolTCP.Options` used by Network.framework
+    /// client connections on Apple platforms.
+    public var configureNWTCPOptions: (@Sendable (NWProtocolTCP.Options) -> Void)?
+
+    public init(
+        socketOptions: [TCPSocketOption] = [],
+        configureNWTCPOptions: (@Sendable (NWProtocolTCP.Options) -> Void)? = nil
+    ) {
+        self.socketOptions = socketOptions
+        self.configureNWTCPOptions = configureNWTCPOptions
+    }
+#else
+    public init(socketOptions: [TCPSocketOption] = []) {
+        self.socketOptions = socketOptions
+    }
+#endif
+
+    /// Dead-peer detection preset: OS keepalive probes plus a bound on how
+    /// long written data may sit unacknowledged, mapped to the current
+    /// platform's option names.
+    ///
+    /// A half-open socket (peer or NAT silently dropped the path) otherwise
+    /// stays "connected" indefinitely: writes buffer locally, reads never
+    /// fail, and no `channelInactive` fires, so event-driven reconnect and
+    /// failure paths never run. Keepalive probes cover the idle case; the
+    /// unacknowledged-write timeout covers data written into a dead socket,
+    /// which kernels otherwise retransmit for many minutes before erroring
+    /// the connection.
+    ///
+    /// - Parameters:
+    ///   - keepaliveIdleSeconds: Seconds a connection may sit idle before the first probe.
+    ///   - keepaliveIntervalSeconds: Seconds between probes once they start.
+    ///   - keepaliveProbeCount: Consecutive failed probes before the connection is declared dead.
+    ///   - unacknowledgedWriteTimeoutSeconds: Seconds written data may remain unacknowledged
+    ///     before the connection errors.
+    public static func deadPeerDetection(
+        keepaliveIdleSeconds: Int = 60,
+        keepaliveIntervalSeconds: Int = 10,
+        keepaliveProbeCount: Int = 3,
+        unacknowledgedWriteTimeoutSeconds: Int = 30
+    ) -> TCPTransportOptions {
+        var socketOptions: [TCPSocketOption] = [
+            TCPSocketOption(level: CInt(SOL_SOCKET), name: SO_KEEPALIVE, value: 1)
+        ]
+#if os(Linux) || os(Android)
+        // Kernel defaults send the first probe only after ~2h idle, which
+        // leaves half-open sockets undetected for the whole session.
+        // TCP_USER_TIMEOUT (ms) additionally bounds how long written data may
+        // sit unacknowledged before the kernel errors the connection.
+        socketOptions.append(contentsOf: [
+            TCPSocketOption(
+                level: CInt(IPPROTO_TCP), name: TCP_KEEPIDLE,
+                value: CInt(keepaliveIdleSeconds)),
+            TCPSocketOption(
+                level: CInt(IPPROTO_TCP), name: TCP_KEEPINTVL,
+                value: CInt(keepaliveIntervalSeconds)),
+            TCPSocketOption(
+                level: CInt(IPPROTO_TCP), name: TCP_KEEPCNT,
+                value: CInt(keepaliveProbeCount)),
+            TCPSocketOption(
+                level: CInt(IPPROTO_TCP), name: TCP_USER_TIMEOUT,
+                value: CInt(unacknowledgedWriteTimeoutSeconds * 1000)),
+        ])
+#elseif canImport(Darwin)
+        // Darwin spelling of the same tuning; applies to POSIX bootstraps
+        // (server child channels) since NIOTS connections use NW options below.
+        // TCP_KEEPALIVE is idle seconds; TCP_RXT_CONNDROPTIME is the
+        // unacknowledged-retransmission bound in seconds.
+        socketOptions.append(contentsOf: [
+            TCPSocketOption(
+                level: CInt(IPPROTO_TCP), name: TCP_KEEPALIVE,
+                value: CInt(keepaliveIdleSeconds)),
+            TCPSocketOption(
+                level: CInt(IPPROTO_TCP), name: TCP_KEEPINTVL,
+                value: CInt(keepaliveIntervalSeconds)),
+            TCPSocketOption(
+                level: CInt(IPPROTO_TCP), name: TCP_KEEPCNT,
+                value: CInt(keepaliveProbeCount)),
+            TCPSocketOption(
+                level: CInt(IPPROTO_TCP), name: TCP_RXT_CONNDROPTIME,
+                value: CInt(unacknowledgedWriteTimeoutSeconds)),
+        ])
+#endif
+
+#if canImport(Network)
+        return TCPTransportOptions(
+            socketOptions: socketOptions,
+            configureNWTCPOptions: { tcpOptions in
+                // Keepalive probes surface an *idle* half-open socket as a
+                // connection failure (the channelInactive event reconnect and
+                // failure paths key off). connectionDropTime bounds how long
+                // written data may go unacknowledged before the connection errors.
+                tcpOptions.enableKeepalive = true
+                tcpOptions.keepaliveIdle = keepaliveIdleSeconds
+                tcpOptions.keepaliveInterval = keepaliveIntervalSeconds
+                tcpOptions.keepaliveCount = keepaliveProbeCount
+                tcpOptions.connectionDropTime = unacknowledgedWriteTimeoutSeconds
+            })
+#else
+        return TCPTransportOptions(socketOptions: socketOptions)
+#endif
+    }
+}
+
 /// Configuration for server-side networking setup.
 ///
 /// This struct defines the configuration needed to set up a server that can accept
@@ -249,6 +388,10 @@ public struct Configuration: Sendable {
     /// not be modified directly.
     public var address: SocketAddress?
     
+    /// TCP options applied to accepted child channels. Empty by default
+    /// (kernel defaults); adopters opt in, e.g. `.deadPeerDetection()`.
+    public var transportOptions: TCPTransportOptions
+    
     /// Creates a new server configuration.
     ///
     /// - Parameters:
@@ -256,15 +399,18 @@ public struct Configuration: Sendable {
     ///   - host: The host address to bind to. Defaults to `nil` (all interfaces).
     ///   - port: The port number to bind to. Defaults to `0` (system-assigned).
     ///   - loadBalancedServers: An array of server locations for load balancing. Defaults to empty.
+    ///   - transportOptions: TCP options for accepted child channels. Defaults to none.
     public init(
         group: EventLoopGroup,
         host: String? = nil,
         port: Int = 0,
         loadBalancedServers: [ServerLocation] = [],
+        transportOptions: TCPTransportOptions = .init()
     ) {
         self.group = group
         self.host = host
         self.port = port
         self.loadBalancedClients = loadBalancedServers
+        self.transportOptions = transportOptions
     }
 }
