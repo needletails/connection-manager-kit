@@ -124,17 +124,12 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
     private weak var listenerDelegate: ListenerDelegate?
     nonisolated(unsafe) private weak var serviceListenerDelegate: ServiceListenerDelegate?
 
-    nonisolated(unsafe) private var serverChannel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>?
+    private var listeningChannel: Channel?
     
     // Optimization: Add connection management
     private var activeConnections = 0
-    private var maxConnectionsReached = false
     private var maxConcurrentConnections: Int = 1000
     
-    // Performance monitoring
-    private var connectionMetrics: [String: ConnectionMetrics] = [:]
-    private var cleanupTask: Task<Void, Never>?
-    private var isShuttingDown = false
     private var createWebsocketServer: Bool = false
     nonisolated(unsafe) internal var websocketConfiguration: WebSocketUpgradeConfig?
     
@@ -163,12 +158,6 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
         self.listenerDelegate = listenerDelegate
         self.serviceListenerDelegate = serviceListenerDelegate
         self.maxConcurrentConnections = maxConcurrentConnections
-        
-        // Start cleanup task
-        Task { [weak self] in
-            guard let self else { return }
-            await startCleanupTask()
-        }
     }
     
     func run() async throws {
@@ -179,6 +168,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
         do {
             if createWebsocketServer {
                 let serverChannel = try await createWebSocketChannel()
+                self.listeningChannel = serverChannel.channel
                 
                 await listenerDelegate?.didBindWebSocketServer(channel: serverChannel)
                 
@@ -195,7 +185,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                             // Accept connection and increment counter
                             await incrementActiveConnections()
                             
-                            // Handle child channel with timeout and error recovery
+                            // Each accepted channel is owned by one child task.
                             group.addTask { [weak self] in
                                 guard let self else { return }
                                 await self.handleChildChannelWithRecovery(childChannel)
@@ -206,7 +196,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                 
             } else {
                 let serverChannel = try await createTCPServerChannel()
-                self.serverChannel = serverChannel
+                self.listeningChannel = serverChannel.channel
                 
                 // Notify listener delegate
                 await listenerDelegate?.didBindTCPServer(channel: serverChannel)
@@ -301,7 +291,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                     // Accept connection and increment counter
                     await incrementActiveConnections()
                     
-                    // Handle child channel with timeout and error recovery
+                    // Each accepted channel is owned by one child task.
                     group.addTask { [weak self] in
                         guard let self else { return }
                         await self.handleChildChannelWithRecovery(childChannel)
@@ -313,27 +303,20 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
     
     private func handleChildChannelWithRecovery(_ childChannel: NIOAsyncChannel<Inbound, Outbound>) async {
         let channelId = UUID().uuidString
-        let startTime = TimeAmount.now
         
         do {
-            // Set up connection metrics
-            setConnectionMetrics(channelId: channelId, startTime: startTime)
-            
-            // Handle the channel
-            try await self.handleChildChannel(childChannel: childChannel)
+            try await self.handleChildChannel(
+                childChannel: childChannel,
+                channelId: channelId
+            )
             
         } catch {
             logger.log(level: .error, message: "Child channel \(channelId) failed: \(error)")
-            
-            // Attempt recovery for certain error types
-            if await shouldAttemptRecovery(for: error) {
-                await attemptChannelRecovery(channelId: channelId, childChannel: childChannel)
-            }
         }
         
-        // Cleanup
         decrementActiveConnections()
-        removeConnectionMetrics(channelId: channelId)
+        removeChildChannelState(id: channelId)
+        await delegate.childChannelDidClose(id: channelId)
     }
     
     private func canAcceptConnection() async -> Bool {
@@ -343,66 +326,10 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
     
     private func incrementActiveConnections() {
         activeConnections += 1
-        maxConnectionsReached = activeConnections >= maxConcurrentConnections
     }
     
     private func decrementActiveConnections() {
         activeConnections = max(0, activeConnections - 1)
-        maxConnectionsReached = false
-    }
-    
-    private func shouldAttemptRecovery(for error: Error) async -> Bool {
-        // Attempt recovery for specific error types
-        switch error {
-        case is ChannelError:
-            return true
-        case is IOError:
-            return true
-        default:
-            return false
-        }
-    }
-    
-    private func attemptChannelRecovery(channelId: String, childChannel: NIOAsyncChannel<Inbound, Outbound>) async {
-        logger.log(level: .info, message: "Attempting recovery for channel \(channelId)")
-        
-        // Recovery logic would be implemented here based on specific requirements
-        logger.log(level: .info, message: "Recovery attempted for channel \(channelId)")
-    }
-    
-    private func startCleanupTask() {
-        cleanupTask = Task { [weak self] in
-            guard let self else { return }
-            while true {
-                let isShuttingDown = await self.isShuttingDown
-                if isShuttingDown { break }
-                
-                await performPeriodicCleanup()
-                try? await Task.sleep(for: .seconds(60)) // Cleanup every minute
-            }
-            logger.log(level: .debug, message: "Cleanup task stopped due to shutdown")
-        }
-    }
-    
-    private func performPeriodicCleanup() async {
-        // Clean up stale connections
-        let now = TimeAmount.now
-        let staleThreshold: TimeAmount = .seconds(300) // 5 minutes
-        
-        for (channelId, metrics) in connectionMetrics {
-            if now - metrics.startTime > staleThreshold {
-                logger.log(level: .debug, message: "Cleaning up stale connection \(channelId)")
-                removeConnectionMetrics(channelId: channelId)
-            }
-        }
-    }
-    
-    private func setConnectionMetrics(channelId: String, startTime: TimeAmount) {
-        connectionMetrics[channelId] = ConnectionMetrics(startTime: startTime)
-    }
-    
-    private func removeConnectionMetrics(channelId: String) {
-        connectionMetrics.removeValue(forKey: channelId)
     }
     
     private func stopTLS(from id: String) async {
@@ -435,6 +362,10 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
         }
         self.inboundContinuations[id]?.finish()
         self.outboundContinuations[id]?.finish()
+        removeChildChannelState(id: id)
+    }
+
+    private func removeChildChannelState(id: String) {
         self.inboundContinuations.removeValue(forKey: id)
         self.outboundContinuations.removeValue(forKey: id)
         self.channelContexts.removeAll(where: { $0.id == id })
@@ -448,51 +379,47 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
     }
     
     func shutdown() async throws {
-        // Set shutdown flag
-        isShuttingDown = true
-        
-        // Cancel cleanup task
-        cleanupTask?.cancel()
-        
-        // Shutdown all child channels
-        for context in channelContexts {
+        let contexts = channelContexts
+        for context in contexts {
             await stopTLS(from: context.id)
+            try? await context.channel.channel.close()
         }
-        
-        // Finish all continuations
-        for continuation in inboundContinuations {
-            continuation.value.finish()
+
+        for continuation in inboundContinuations.values {
+            continuation.finish()
         }
-        for continuation in outboundContinuations {
-            continuation.value.finish()
+        for continuation in outboundContinuations.values {
+            continuation.finish()
         }
-        
-        // Clear all collections
+
         inboundContinuations.removeAll()
         outboundContinuations.removeAll()
         contextDelegates.removeAll()
         channelContexts.removeAll()
-        connectionMetrics.removeAll()
-        
-        // Close server channel
-        try await serverChannel?.executeThenClose({_,_ in })
+
+        if let listeningChannel, listeningChannel.isActive {
+            try await listeningChannel.close()
+        }
+        listeningChannel = nil
         
         logger.log(level: .info, message: "Server service shutdown complete")
     }
     
-    nonisolated func handleChildChannel(childChannel: NIOAsyncChannel<Inbound, Outbound>) async throws {
+    nonisolated func handleChildChannel(
+        childChannel: NIOAsyncChannel<Inbound, Outbound>,
+        channelId: String
+    ) async throws {
         try await childChannel.executeThenClose { inbound, outbound in
             try await withThrowingDiscardingTaskGroup { group in
-                let channelId = UUID()
                 do {
                     let channelContext = ChannelContext(
-                        id: channelId.uuidString,
+                        id: channelId,
                         channel: childChannel)
                     await appendContext(channelContext)
                     await delegate.initializedChildChannel(channelContext)
                     
                     let (_outbound, outboundContinuation) = AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.makeStream()
-                    await setOutboundContinuation(outboundContinuation, id: channelId.uuidString)
+                    await setOutboundContinuation(outboundContinuation, id: channelId)
                     outboundContinuation.onTermination = { [weak self] status in
 #if DEBUG
                         guard let self else { return }
@@ -501,7 +428,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                     }
                     
                     let (_inbound, inboundContinuation) = AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.makeStream()
-                    await setInboundContinuation(inboundContinuation, id: channelId.uuidString)
+                    await setInboundContinuation(inboundContinuation, id: channelId)
                     inboundContinuation.onTermination = { [weak self] status in
 #if DEBUG
                         guard let self else { return }
@@ -517,13 +444,13 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                         guard let self else { return }
                         for await writer in _outbound.cancelOnGracefulShutdown() {
                             let writerContext = WriterContext(
-                                id: channelId.uuidString,
+                                id: channelId,
                                 channel: childChannel,
                                 writer: writer)
-                            if let contextDelegate = await contextDelegates[channelId.uuidString] {
+                            if let contextDelegate = await contextDelegates[channelId] {
                                 await contextDelegate.deliverWriter(context: writerContext)
                             } else {
-                                await noteMissingContextDelegateDrop(channelId: channelId.uuidString, path: "writer")
+                                await noteMissingContextDelegateDrop(channelId: channelId, path: "writer")
                             }
                         }
                     }
@@ -532,20 +459,20 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                         // Serial in-order delivery per connection (do not parallelize messages).
                         for try await inbound in stream.cancelOnGracefulShutdown() {
                             let streamContext = StreamContext(
-                                id: channelId.uuidString,
+                                id: channelId,
                                 channel: childChannel,
                                 inbound: inbound)
-                            if let contextDelegate = await contextDelegates[channelId.uuidString] {
+                            if let contextDelegate = await contextDelegates[channelId] {
                                 await contextDelegate.deliverInboundBuffer(context: streamContext)
                             } else {
-                                await noteMissingContextDelegateDrop(channelId: channelId.uuidString, path: "inbound")
+                                await noteMissingContextDelegateDrop(channelId: channelId, path: "inbound")
                             }
                         }
                         inboundContinuation.finish()
                         outboundContinuation.finish()
                         // Ensure the outbound writer is finished to prevent memory leaks
                         outbound.finish()
-                        if let contextDelegate = await contextDelegates[channelId.uuidString] {
+                        if let contextDelegate = await contextDelegates[channelId] {
                             await contextDelegate.didShutdownChildChannel()
                         }
                         return
@@ -554,10 +481,10 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                 } catch {
                     // Ensure outbound writer is finished even on error
                     outbound.finish()
-                    if let contextDelegate = await contextDelegates[channelId.uuidString] {
-                        await contextDelegate.reportChildChannel(error: error, id: channelId.uuidString)
+                    if let contextDelegate = await contextDelegates[channelId] {
+                        await contextDelegate.reportChildChannel(error: error, id: channelId)
                     } else {
-                        await noteMissingContextDelegateDrop(channelId: channelId.uuidString, path: "error")
+                        await noteMissingContextDelegateDrop(channelId: channelId, path: "error")
                     }
                 }
             }
@@ -574,17 +501,5 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
     
     func setOutboundContinuation(_ continuation: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation, id: String) async {
         self.outboundContinuations[id] = continuation
-    }
-}
-
-// MARK: - Helper Types
-
-private struct ConnectionMetrics {
-    let startTime: TimeAmount
-    var lastActivity: TimeAmount
-    
-    init(startTime: TimeAmount) {
-        self.startTime = startTime
-        self.lastActivity = startTime
     }
 }

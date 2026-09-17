@@ -252,27 +252,19 @@ let strategy = RetryStrategy.custom { attempt, maxAttempts in
 }
 ```
 
-## Integration with Connection Pooling
+## Integration with Connection Caching
 
-Retry strategies work seamlessly with connection pooling:
+Successful retried connections are stored by cache key:
 
 ```swift
-let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
+let manager = ConnectionManager<ByteBuffer, ByteBuffer>(
+    cacheConfiguration: .init(maxConnections: 10, enableLRU: true)
+)
 
-// Connect with retry strategy
 try await manager.connect(
     to: servers,
     retryStrategy: .exponential(initialDelay: .seconds(1))
 )
-
-// Use pooled connections
-let connection = await manager.connectionCache.acquireConnection(
-    for: "server-key",
-    poolConfiguration: .init(maxConnections: 10)
-)
-
-// Return connection to pool
-await manager.connectionCache.returnConnection(connection, for: "server-key")
 ```
 
 ## Error Handling

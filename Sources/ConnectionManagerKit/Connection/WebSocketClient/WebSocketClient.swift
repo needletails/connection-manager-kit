@@ -16,6 +16,7 @@ import Foundation
 #if canImport(Observation) && !os(Linux)
 import Observation
 #endif
+import NIOConcurrencyHelpers
 import NIOFoundationCompat
 import NIOHTTP1
 #if canImport(Network)
@@ -33,8 +34,10 @@ import Network
 #endif
 public final class SocketReceiver: Sendable {
     
-    public init() {}
-    
+    public init() {
+        prepareForConnection()
+    }
+
     /// Inbound WebSocket message kinds delivered to `messageStream`.
     public enum WebSocketOpcode: Sendable, Equatable {
         case text(String)
@@ -90,157 +93,113 @@ public final class SocketReceiver: Sendable {
     public var eventContinuation: AsyncStream<WebSocketEvent>.Continuation?
     
     private func makeMessageStream() {
-        messageStream = AsyncStream<WebSocketOpcode> { [weak self] continuation in
-            guard let self else { return }
-            self.messageContinuation = continuation
-        }
+        let pair = AsyncStream<WebSocketOpcode>.makeStream()
+        messageStream = pair.stream
+        messageContinuation = pair.continuation
     }
     
     private func makeEventStream() {
-        eventStream = AsyncStream<WebSocketEvent> { [weak self] continuation in
-            guard let self else { return }
-            self.eventContinuation = continuation
-        }
+        let pair = AsyncStream<WebSocketEvent>.makeStream()
+        eventStream = pair.stream
+        eventContinuation = pair.continuation
     }
-    
-    /// Internal: updates observed state and emits to `messageStream`.
-    public func setInboundMessage(_ message: WebSocketOpcode) {
+
+    func prepareForConnection() {
         if messageStream == nil {
             makeMessageStream()
         }
-#if canImport(Observation) && !os(Linux)
-        _ = withObservationTracking {
-            self.webSocketFrame
-        } onChange: {
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.messageContinuation?.yield(message)
-            }
+        if eventStream == nil {
+            makeEventStream()
         }
-#else
-        self.messageContinuation?.yield(message)
-#endif
+    }
+
+    func finishStreams() {
+        messageContinuation?.finish()
+        eventContinuation?.finish()
+        messageContinuation = nil
+        eventContinuation = nil
+        messageStream = nil
+        eventStream = nil
+    }
+
+    /// Internal: updates observed state and emits to `messageStream`.
+    public func setInboundMessage(_ message: WebSocketOpcode) {
+        prepareForConnection()
         webSocketFrame = message
+        messageContinuation?.yield(message)
     }
 #if canImport(Network)
     /// Internal: updates observed state and emits a Network event to `eventStream`.
     public func setNetworkEvent(_ event: NetworkEventMonitor.NetworkEvent) {
-        if eventStream == nil {
-            makeEventStream()
-        }
-#if canImport(Observation) && !os(Linux)
-        _ = withObservationTracking {
-            self.networkEvent
-        } onChange: {
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.eventContinuation?.yield(.networkEvent(event))
-            }
-        }
-#else
-        self.eventContinuation?.yield(.networkEvent(event))
-#endif
+        prepareForConnection()
         self.networkEvent = .networkEvent(event)
+        eventContinuation?.yield(.networkEvent(event))
     }
 #else
     /// Internal (Linux): updates observed state and emits an NIO event to `eventStream`.
     public func setNIOEvent(_ event: ConnectionManagerKit.NetworkEventMonitor.NIOEvent) {
-        if eventStream == nil {
-            makeEventStream()
-        }
-#if canImport(Observation) && !os(Linux)
-        _ = withObservationTracking {
-            self.networkEvent
-        } onChange: {
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.eventContinuation?.yield(.networkEvent(event))
-            }
-        }
-#else
-        self.eventContinuation?.yield(.networkEvent(event))
-#endif
+        prepareForConnection()
         self.networkEvent = .networkEvent(event)
+        eventContinuation?.yield(.networkEvent(event))
     }
 #endif
     
     /// Internal: emits an error event to `eventStream`.
     public func setError(_ error: Error) {
-        if eventStream == nil {
-            makeEventStream()
-        }
-#if canImport(Observation) && !os(Linux)
-        _ = withObservationTracking {
-            self.networkEvent
-        } onChange: {
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.eventContinuation?.yield(.error(error))
-            }
-        }
-#else
-        self.eventContinuation?.yield(.error(error))
-#endif
+        prepareForConnection()
         self.networkEvent = .error(error)
+        eventContinuation?.yield(.error(error))
     }
     
     /// Internal: emits channel active to `eventStream`.
     public func setChannelActive() {
-        if eventStream == nil {
-            makeEventStream()
-        }
-#if canImport(Observation) && !os(Linux)
-        _ = withObservationTracking {
-            self.networkEvent
-        } onChange: {
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.eventContinuation?.yield(.channelActive)
-            }
-        }
-#else
-        self.eventContinuation?.yield(.channelActive)
-#endif
+        prepareForConnection()
         self.networkEvent = .channelActive
+        eventContinuation?.yield(.channelActive)
     }
     
     /// Internal: emits channel inactive to `eventStream`.
     public func setChannelInactive() {
-        if eventStream == nil {
-            makeEventStream()
-        }
-#if canImport(Observation) && !os(Linux)
-        _ = withObservationTracking {
-            self.networkEvent
-        } onChange: {
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.eventContinuation?.yield(.channelInactive)
-            }
-        }
-#else
-        self.eventContinuation?.yield(.channelInactive)
-#endif
+        prepareForConnection()
         self.networkEvent = .channelInactive
+        eventContinuation?.yield(.channelInactive)
     }
 }
 
 private final class WSConnectionDelegate: ConnectionDelegate, @unchecked Sendable {
     private weak var socketReceiver: SocketReceiver?
+    private let errorTask = NIOLockedValueBox<Task<Void, Never>?>(nil)
+    private let networkEventsTask = NIOLockedValueBox<Task<Void, Never>?>(nil)
     
     init(socketReceiver: SocketReceiver) {
         self.socketReceiver = socketReceiver
     }
-    private var handleErrorTask: Task<Void, Never>?
-    private var handleNetworkEventsTask: Task<Void, Never>?
+
+    private func replaceTask(
+        in box: NIOLockedValueBox<Task<Void, Never>?>,
+        with task: Task<Void, Never>
+    ) {
+        let previous = box.withLockedValue { stored in
+            let previous = stored
+            stored = task
+            return previous
+        }
+        previous?.cancel()
+    }
+
+    func invalidate() {
+        let tasks = [errorTask, networkEventsTask].compactMap { box in
+            box.withLockedValue { stored in
+                defer { stored = nil }
+                return stored
+            }
+        }
+        tasks.forEach { $0.cancel() }
+    }
     
 #if canImport(Network)
     func handleError(_ stream: AsyncStream<NWError>, id: String) {
-        if let handleErrorTask {
-            handleErrorTask.cancel()
-            self.handleErrorTask = nil
-        }
-        handleErrorTask = Task {
+        let task = Task { [weak self] in
             for await error in stream {
                 await MainActor.run { [weak self] in
                     guard let self else { return }
@@ -248,14 +207,11 @@ private final class WSConnectionDelegate: ConnectionDelegate, @unchecked Sendabl
                 }
             }
         }
+        replaceTask(in: errorTask, with: task)
     }
     
     func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>, id: String) async {
-        if let handleNetworkEventsTask {
-            handleNetworkEventsTask.cancel()
-            self.handleNetworkEventsTask = nil
-        }
-        handleNetworkEventsTask = Task {
+        let task = Task { [weak self] in
             for await event in stream {
                 await MainActor.run { [weak self] in
                        guard let self else { return }
@@ -263,14 +219,11 @@ private final class WSConnectionDelegate: ConnectionDelegate, @unchecked Sendabl
                 }
             }
         }
+        replaceTask(in: networkEventsTask, with: task)
     }
 #else
     func handleError(_ stream: AsyncStream<IOError>, id: String) {
-        if let handleErrorTask {
-            handleErrorTask.cancel()
-            self.handleErrorTask = nil
-        }
-        Task {
+        let task = Task { [weak self] in
             for await error in stream {
                 await MainActor.run { [weak self] in
                     guard let self else { return }
@@ -278,14 +231,11 @@ private final class WSConnectionDelegate: ConnectionDelegate, @unchecked Sendabl
                 }
             }
         }
+        replaceTask(in: errorTask, with: task)
     }
     
     func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NIOEvent>, id: String) async {
-        if let handleNetworkEventsTask {
-            handleNetworkEventsTask.cancel()
-            self.handleNetworkEventsTask = nil
-        }
-        handleNetworkEventsTask = Task {
+        let task = Task { [weak self] in
             for await event in stream {
                 await MainActor.run { [weak self] in
                     guard let self else { return }
@@ -293,6 +243,7 @@ private final class WSConnectionDelegate: ConnectionDelegate, @unchecked Sendabl
                 }
             }
         }
+        replaceTask(in: networkEventsTask, with: task)
     }
 #endif
     
@@ -315,12 +266,16 @@ public actor WebSocketClient {
     @MainActor
     public let socketReceiver: SocketReceiver
     
-    private var autoPingPong = false
-    private var autoPingPongInterval: TimeInterval?
-    private var autoPingTimeout: TimeInterval = 10
+    private struct HeartbeatPolicy: Sendable {
+        let enabled: Bool
+        let interval: TimeInterval?
+        let timeout: TimeInterval
+    }
+
     private var nextPingTasks: [String: Task<Void, Never>] = [:]
     private var pongTimeoutTasks: [String: Task<Void, Never>] = [:]
     private var awaitingPongRoutes: Set<String> = []
+    private var heartbeatPolicies: [String: HeartbeatPolicy] = [:]
     
     public init(socketReceiver: SocketReceiver) {
         self.socketReceiver = socketReceiver
@@ -417,6 +372,11 @@ public actor WebSocketClient {
     ///   - timeout: Connection timeout
     ///   - tlsPreKeyed: Optional TLS configuration
     ///   - retryStrategy: Retry policy for reconnection attempts
+    ///
+    /// Connecting is idempotent per route: if `route` is already connected this call
+    /// returns immediately and leaves the live connection (and its headers, TLS, and
+    /// heartbeat settings) untouched. Call `disconnect(_:)` first to reconnect with
+    /// different parameters.
     public func connect(
         host: String = "localhost",
         port: Int = 8080,
@@ -431,10 +391,15 @@ public actor WebSocketClient {
         autoPingPongInterval: TimeInterval? = 60,
         autoPingTimeout: TimeInterval = 10
     ) async throws {
-        self.autoPingPong = autoPingPong
-        self.autoPingPongInterval = autoPingPongInterval
-        self.autoPingTimeout = autoPingTimeout
         if connections[route] != nil { return }
+        heartbeatPolicies[route] = HeartbeatPolicy(
+            enabled: autoPingPong,
+            interval: autoPingPongInterval,
+            timeout: autoPingTimeout
+        )
+        await MainActor.run { [socketReceiver] in
+            socketReceiver.prepareForConnection()
+        }
         let manager = ConnectionManager<WebSocketFrame, WebSocketFrame>()
         manager.webSocketOptions = WebSocketOptions(uri: route, headers: headers)
         let connectionDelegate = WSConnectionDelegate(socketReceiver: socketReceiver)
@@ -446,19 +411,31 @@ public actor WebSocketClient {
             cacheKey: "ws-\(route)",
             delegate: connectionDelegate,
             contextDelegate: routeDelegate)
-        try await manager.connectWebSocket(
-            to: [server],
-            maxReconnectionAttempts: maxReconnectionAttempts,
-            timeout: timeout,
-            tlsPreKeyed: tlsPreKeyed,
-            retryStrategy: retryStrategy)
-        
+
+        // Register the route before connecting so the writer-delivery event
+        // (which starts the heartbeat) always finds its bucket.
         connections[route] = ConnectionBucket(
             manager: manager,
             contextDelegate: routeDelegate,
             connectionDelegate: connectionDelegate)
+        do {
+            try await manager.connectWebSocket(
+                to: [server],
+                maxReconnectionAttempts: maxReconnectionAttempts,
+                timeout: timeout,
+                tlsPreKeyed: tlsPreKeyed,
+                retryStrategy: retryStrategy)
+        } catch {
+            connections.removeValue(forKey: route)
+            heartbeatPolicies.removeValue(forKey: route)
+            connectionDelegate.invalidate()
+            await routeDelegate.invalidate()
+            throw error
+        }
+    }
 
-        // Start heartbeat: send an initial ping now, then schedule next after pong
+    /// The outbound writer for `route` is available; this is the event that starts the heartbeat.
+    fileprivate func writerDidBecomeAvailable(for route: String) async {
         await startHeartbeatIfNeeded(for: route)
     }
     
@@ -475,16 +452,14 @@ public actor WebSocketClient {
         pongTimeoutTasks.removeAll()
         awaitingPongRoutes.removeAll()
         for bucket in connections.values {
+            bucket.connectionDelegate.invalidate()
+            await bucket.contextDelegate.invalidate()
             await bucket.manager.gracefulShutdown()
         }
         connections.removeAll()
+        heartbeatPolicies.removeAll()
         await MainActor.run { [socketReceiver] in
-            socketReceiver.messageContinuation?.finish()
-            socketReceiver.eventContinuation?.finish()
-            socketReceiver.messageContinuation = nil
-            socketReceiver.eventContinuation = nil
-            socketReceiver.messageStream = nil
-            socketReceiver.eventStream = nil
+            socketReceiver.finishStreams()
         }
     }
     
@@ -492,8 +467,19 @@ public actor WebSocketClient {
     public func disconnect(_ route: String = "/") async {
         // Cancel per-route heartbeat and timeout
         await cancelHeartbeat(for: route)
+        heartbeatPolicies.removeValue(forKey: route)
         guard let bucket = connections.removeValue(forKey: route) else { return }
+        bucket.connectionDelegate.invalidate()
+        await bucket.contextDelegate.invalidate()
         await bucket.manager.gracefulShutdown()
+    }
+
+    fileprivate func routeDidClose(_ route: String) async {
+        await cancelHeartbeat(for: route)
+        heartbeatPolicies.removeValue(forKey: route)
+        guard let bucket = connections.removeValue(forKey: route) else { return }
+        bucket.connectionDelegate.invalidate()
+        await bucket.contextDelegate.invalidate()
     }
     
     /// Send a text frame to the specified route.
@@ -515,11 +501,7 @@ public actor WebSocketClient {
     /// Send a ping frame to the specified route.
     public func sendPing(_ data: any DataProtocol, to route: String = "/") async throws {
         var buffer = ByteBuffer()
-        if let byteBufferView = data as? ByteBufferView {
-            buffer = ByteBuffer(byteBufferView)
-        } else if let data = data as? Data {
-            buffer = ByteBuffer(data: data)
-        }
+        buffer.writeBytes(data)
         let pingFrame = WebSocketFrame(fin: true, opcode: .ping, maskKey: maskKey, data: buffer)
         guard let bucket = connections[route] else { throw Errors.noConnectionForRoute(route) }
         guard let writer = await bucket.contextDelegate.writer else { throw Errors.writerUnavailable(route) }
@@ -529,11 +511,7 @@ public actor WebSocketClient {
     /// Send a pong frame to the specified route.
     public func sendPong(_ data: any DataProtocol, to route: String = "/") async throws {
         var buffer = ByteBuffer()
-        if let byteBufferView = data as? ByteBufferView {
-            buffer = ByteBuffer(byteBufferView)
-        } else if let data = data as? Data {
-            buffer = ByteBuffer(data: data)
-        }
+        buffer.writeBytes(data)
         let pongFrame = WebSocketFrame(fin: true, opcode: .pong, maskKey: maskKey, data: buffer)
         guard let bucket = connections[route] else { throw Errors.noConnectionForRoute(route) }
         guard let writer = await bucket.contextDelegate.writer else { throw Errors.writerUnavailable(route) }
@@ -551,7 +529,7 @@ public actor WebSocketClient {
         case .ping:
             let payload = frame.data.getData(at: 0, length: frame.data.readableBytes) ?? Data()
             // Immediate pong per spec
-            if autoPingPong {
+            if heartbeatPolicies[route]?.enabled == true {
                 do {
                     try await sendPong(payload, to: route)
                 } catch {
@@ -567,7 +545,7 @@ public actor WebSocketClient {
             // Mark pong received and schedule next ping after interval
             awaitingPongRoutes.remove(route)
             if let t = pongTimeoutTasks.removeValue(forKey: route) { t.cancel() }
-            if autoPingPong {
+            if heartbeatPolicies[route]?.enabled == true {
                 await scheduleNextPingAfterInterval(for: route)
             }
             await MainActor.run { [weak self] in
@@ -605,6 +583,8 @@ actor RouteContextDelegate: ChannelContextDelegate {
     let route: String
     weak var socket: WebSocketClient?
     var writer: NIOAsyncChannelOutboundWriter<WebSocketFrame>?
+    nonisolated private let activeTask = NIOLockedValueBox<Task<Void, Never>?>(nil)
+    nonisolated private let inactiveTask = NIOLockedValueBox<Task<Void, Never>?>(nil)
     
     init(route: String, socket: WebSocketClient) {
         self.route = route
@@ -615,6 +595,7 @@ actor RouteContextDelegate: ChannelContextDelegate {
         guard Outbound.self == WebSocketFrame.self else { return }
         let writer = context.writer as! NIOAsyncChannelOutboundWriter<WebSocketFrame>
         self.writer = writer
+        await socket?.writerDidBecomeAvailable(for: route)
     }
     
     func deliverInboundBuffer<Inbound, Outbound>(context: StreamContext<Inbound, Outbound>) async where Inbound : Sendable, Outbound : Sendable {
@@ -623,20 +604,45 @@ actor RouteContextDelegate: ChannelContextDelegate {
     }
     
     nonisolated func channelActive(_ stream: AsyncStream<Void>, id: String) {
-        Task { [weak self] in
+        let task = Task { [weak self] in
             guard let self else { return }
             for await _ in stream {
                 await self.notifyChannelActive()
             }
         }
+        replaceTask(in: activeTask, with: task)
     }
     
     nonisolated func channelInactive(_ stream: AsyncStream<Void>, id: String) {
-        Task { [weak self] in
+        let task = Task { [weak self] in
             guard let self else { return }
             for await _ in stream {
                 await self.notifyChannelInactive()
             }
+        }
+        replaceTask(in: inactiveTask, with: task)
+    }
+
+    nonisolated private func replaceTask(
+        in box: NIOLockedValueBox<Task<Void, Never>?>,
+        with task: Task<Void, Never>
+    ) {
+        let previous = box.withLockedValue { stored in
+            let previous = stored
+            stored = task
+            return previous
+        }
+        previous?.cancel()
+    }
+
+    func invalidate() {
+        writer = nil
+        for box in [activeTask, inactiveTask] {
+            let task = box.withLockedValue { stored in
+                defer { stored = nil }
+                return stored
+            }
+            task?.cancel()
         }
     }
     
@@ -646,6 +652,7 @@ actor RouteContextDelegate: ChannelContextDelegate {
     
     func didShutdownChildChannel() async {
         await notifyChannelInactive()
+        await socket?.routeDidClose(route)
     }
     
     private func notifyChannelActive() async {
@@ -673,36 +680,27 @@ actor RouteContextDelegate: ChannelContextDelegate {
 // MARK: - Heartbeat Management
 extension WebSocketClient {
     private func startHeartbeatIfNeeded(for route: String) async {
-        guard autoPingPong, let interval = autoPingPongInterval else { return }
-        // If a next-ping task already exists, keep it
-        if nextPingTasks[route] != nil { return }
-        // Send an initial ping now and arm timeout
-        await sendPingAndArmTimeout(for: route)
-        // Schedule the next ping after we receive a pong (handled in .pong)
-        // Additionally, set up a safety scheduler to ensure pings continue if stream of pongs stalls
-        // This scheduler just ensures there's always a future ping planned; it is cancelled/rescheduled on pong
-        let t = Task { [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                // If awaiting a pong, let timeout handle it; otherwise ensure a ping will be sent later
-                if await !self.awaitingPongRoutes.contains(route) {
-                    do {
-                        try await Task.sleep(until: .now + .seconds(interval))
-                    } catch { break }
-                    await self.sendPingAndArmTimeout(for: route)
-                } else {
-                    // Brief backoff to avoid tight loop
-                    try? await Task.sleep(for: .seconds(1))
-                }
-                if await self.connections[route] == nil { break }
-            }
+        guard
+            let policy = heartbeatPolicies[route],
+            policy.enabled,
+            policy.interval != nil,
+            nextPingTasks[route] == nil,
+            pongTimeoutTasks[route] == nil,
+            !awaitingPongRoutes.contains(route)
+        else {
+            return
         }
-        nextPingTasks[route] = t
+        await sendPingAndArmTimeout(for: route)
     }
     
     private func scheduleNextPingAfterInterval(for route: String) async {
-        guard autoPingPong, let interval = autoPingPongInterval else { return }
-        // Cancel any existing scheduled next ping; reschedule for interval from now
+        guard
+            let policy = heartbeatPolicies[route],
+            policy.enabled,
+            let interval = policy.interval
+        else {
+            return
+        }
         if let t = nextPingTasks.removeValue(forKey: route) { t.cancel() }
         let t = Task { [weak self] in
             guard let self else { return }
@@ -710,8 +708,6 @@ extension WebSocketClient {
                 try await Task.sleep(until: .now + .seconds(interval))
             } catch { return }
             await self.sendPingAndArmTimeout(for: route)
-            // After sending, keep the scheduler alive for subsequent cycles
-            await self.startHeartbeatIfNeeded(for: route)
         }
         nextPingTasks[route] = t
     }
@@ -723,29 +719,34 @@ extension WebSocketClient {
     }
     
     private func sendPingAndArmTimeout(for route: String) async {
-        // If disconnected, skip
-        guard connections[route] != nil else { return }
-        // Send ping with empty payload
-        do { try await sendPing(Data(), to: route) } catch { return }
+        guard
+            connections[route] != nil,
+            let policy = heartbeatPolicies[route],
+            policy.enabled
+        else {
+            return
+        }
+        nextPingTasks.removeValue(forKey: route)
+        // Mark before the suspension point so a concurrent start cannot double-ping.
         awaitingPongRoutes.insert(route)
-        // Cancel any existing timeout and arm a new one
+        do {
+            try await sendPing(Data(), to: route)
+        } catch {
+            // A failed write means the channel is dying; its close event tears the route down.
+            awaitingPongRoutes.remove(route)
+            return
+        }
         if let t = pongTimeoutTasks.removeValue(forKey: route) { t.cancel() }
+        let timeout = policy.timeout
         let watchdog = Task { [weak self] in
             guard let self else { return }
             do {
-                try await Task.sleep(until: .now + .seconds(self.autoPingTimeout))
+                try await Task.sleep(until: .now + .seconds(timeout))
             } catch { return }
-            // If still awaiting, consider the route dead and disconnect
             if await self.awaitingPongRoutes.contains(route) {
-                await removeRoute(route: route)
-                await self.cancelHeartbeat(for: route)
                 await self.disconnect(route)
             }
         }
         pongTimeoutTasks[route] = watchdog
-    }
-    
-    private func removeRoute(route: String) async {
-        self.awaitingPongRoutes.remove(route)
     }
 }

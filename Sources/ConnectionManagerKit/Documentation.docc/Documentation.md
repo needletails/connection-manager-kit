@@ -12,8 +12,7 @@ ConnectionManagerKit provides a high-level interface for managing network connec
 - **Automatic Reconnection**: Built-in retry logic with configurable attempts and backoff
 - **Advanced Retry Strategies**: Fixed delay, exponential backoff with jitter, and custom retry policies
 - **Parallel Connection Establishment**: Concurrent connection setup for improved performance
-- **Connection Pooling**: Efficient connection reuse with acquire/return semantics and configurable pool sizes
-- **Connection Caching**: LRU eviction, TTL support, and automatic cleanup
+- **Bounded Connection Caching**: Keyed reuse with FIFO/LRU eviction and TTL support
 - **TLS Support**: Native TLS/SSL support with customizable configurations
 - **Network Monitoring**: Real-time network event monitoring and state tracking
 - **Modern Swift**: Built with Swift concurrency (async/await) and actors
@@ -49,41 +48,6 @@ try await manager.connect(
     maxReconnectionAttempts: 5,
     timeout: .seconds(10),
     retryStrategy: .exponential(initialDelay: .seconds(1), maxDelay: .seconds(30))
-)
-
-// Use connection pooling for efficient resource management
-let poolConfig = ConnectionPoolConfiguration(
-    minConnections: 2,
-    maxConnections: 10,
-    acquireTimeout: .seconds(5),
-    maxIdleTime: .seconds(60)
-)
-
-let acquiredConnection = try await manager.connectionCache.acquireConnection(
-    for: "api-server",
-    poolConfig: poolConfig
-) {
-    // Connection factory: create and return a new ChildChannelService if needed
-    // Example:
-    return ChildChannelService<ByteBuffer, ByteBuffer>(
-        logger: .init(),
-        config: .init(
-            host: "api.example.com",
-            port: 443,
-            enableTLS: true,
-            cacheKey: "api-server",
-            delegate: connectionDelegate,
-            contextDelegate: contextDelegate
-        ),
-        childChannel: nil,
-        delegate: manager
-    )
-}
-
-// Return the connection to the pool
-await manager.connectionCache.returnConnection(
-    "api-server",
-    poolConfig: poolConfig
 )
 
 // Graceful shutdown when done
@@ -123,9 +87,7 @@ try await manager.connect(
 )
 ```
 
-### Connection Pooling and Caching (Accurate API)
-
-#### Using CacheConfiguration and ConnectionPoolConfiguration
+### Connection Caching
 
 ```swift
 let cacheConfig = CacheConfiguration(
@@ -134,41 +96,8 @@ let cacheConfig = CacheConfiguration(
     enableLRU: true
 )
 
-let poolConfig = ConnectionPoolConfiguration(
-    minConnections: 2,
-    maxConnections: 20,
-    acquireTimeout: .seconds(10),
-    maxIdleTime: .seconds(60)
-)
-
-let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
-
-// Acquire a connection from the pool (factory closure required)
-let acquiredConnection = try await manager.connectionCache.acquireConnection(
-    for: "api-server",
-    poolConfig: poolConfig
-) {
-    // Connection factory: create and return a new ChildChannelService if needed
-    // Example:
-    return ChildChannelService<ByteBuffer, ByteBuffer>(
-        logger: .init(),
-        config: .init(
-            host: "api.example.com",
-            port: 443,
-            enableTLS: true,
-            cacheKey: "api-server",
-            delegate: connectionDelegate,
-            contextDelegate: contextDelegate
-        ),
-        childChannel: nil,
-        delegate: manager
-    )
-}
-
-// Return the connection to the pool
-await manager.connectionCache.returnConnection(
-    "api-server",
-    poolConfig: poolConfig
+let manager = ConnectionManager<ByteBuffer, ByteBuffer>(
+    cacheConfiguration: cacheConfig
 )
 ```
 

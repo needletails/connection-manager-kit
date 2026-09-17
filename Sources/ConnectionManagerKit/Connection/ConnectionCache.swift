@@ -62,21 +62,28 @@ public struct CacheConfiguration: Sendable {
     public let enableLRU: Bool
     
     public init(maxConnections: Int = 100, ttl: TimeAmount? = nil, enableLRU: Bool = false) {
+        precondition(maxConnections > 0, "maxConnections must be greater than zero")
+        if let ttl {
+            precondition(ttl.nanoseconds >= 0, "ttl must not be negative")
+        }
         self.maxConnections = maxConnections
         self.ttl = ttl
         self.enableLRU = enableLRU
     }
 }
 
-/// Configuration for connection pooling behavior.
+/// Legacy pooling configuration retained for source compatibility.
+///
+/// ConnectionManagerKit provides a keyed cache and does not consume this configuration.
+@available(*, deprecated, message: "ConnectionManagerKit provides a keyed connection cache, not a multi-checkout connection pool.")
 public struct ConnectionPoolConfiguration: Sendable {
-    /// Minimum number of connections to maintain in the pool.
+    /// Legacy minimum connection setting.
     public let minConnections: Int
-    /// Maximum number of connections in the pool.
+    /// Legacy maximum connection setting.
     public let maxConnections: Int
-    /// Timeout for acquiring a connection from the pool.
+    /// Legacy acquisition timeout setting.
     public let acquireTimeout: TimeAmount
-    /// Maximum time a connection can remain idle before being closed.
+    /// Legacy idle timeout setting.
     public let maxIdleTime: TimeAmount
     
     public init(
@@ -89,33 +96,6 @@ public struct ConnectionPoolConfiguration: Sendable {
         self.maxConnections = maxConnections
         self.acquireTimeout = acquireTimeout
         self.maxIdleTime = maxIdleTime
-    }
-}
-
-/// A connection pool entry that tracks connection state and usage.
-private struct PoolEntry<Inbound: Sendable, Outbound: Sendable>: Sendable {
-    let connection: ChildChannelService<Inbound, Outbound>
-    var lastUsed: TimeAmount
-    var isInUse: Bool
-    
-    init(connection: ChildChannelService<Inbound, Outbound>) {
-        self.connection = connection
-        self.lastUsed = TimeAmount.now
-        self.isInUse = false
-    }
-    
-    func markAsUsed() -> PoolEntry<Inbound, Outbound> {
-        var entry = self
-        entry.lastUsed = TimeAmount.now
-        entry.isInUse = true
-        return entry
-    }
-    
-    func markAsAvailable() -> PoolEntry<Inbound, Outbound> {
-        var entry = self
-        entry.lastUsed = TimeAmount.now
-        entry.isInUse = false
-        return entry
     }
 }
 
@@ -164,8 +144,16 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
     /// The internal storage for cached connections, keyed by cache key.
     private var connections: [String: ChildChannelService<Inbound, Outbound>] = [:]
     
-    /// LRU tracking for connections (only used when LRU is enabled).
-    private var lruOrder: [String] = []
+    private struct OrderEntry {
+        let key: String
+        let generation: UInt64
+    }
+
+    /// Append-only access order with lazy invalidation and periodic compaction.
+    private var connectionOrder: [OrderEntry] = []
+    private var connectionOrderHead = 0
+    private var orderGeneration: UInt64 = 0
+    private var currentGenerationByKey: [String: UInt64] = [:]
     
     /// Timestamps for TTL tracking (only used when TTL is enabled).
     private var timestamps: [String: TimeAmount] = [:]
@@ -173,8 +161,9 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
     /// The metrics delegate for receiving cache updates.
     public weak var metricsDelegate: ConnectionCacheMetricsDelegate?
     
-    /// Callback to notify when connections are removed (for metrics tracking)
-    private var onConnectionRemoved: (() -> Void)?
+    /// Reports authoritative cache membership changes to the manager.
+    private var onConnectionCountChanged: (@Sendable (Int) async -> Void)?
+    private var isRemovingAllConnections = false
     
     // Swift Metrics
     private let cachedConnectionsGauge = Gauge(label: "connection_cache_cached_connections", dimensions: [("component", "connection_cache")])
@@ -215,10 +204,11 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
         self.configuration = configuration
     }
     
-    /// Sets a callback to be called when connections are removed (for metrics tracking)
-    /// - Parameter callback: The closure to call when connections are removed
-    func setConnectionRemovedCallback(_ callback: @escaping () -> Void) {
-        self.onConnectionRemoved = callback
+    func setConnectionCountChangedCallback(
+        _ callback: @escaping @Sendable (Int) async -> Void
+    ) async {
+        self.onConnectionCountChanged = callback
+        await callback(connections.count)
     }
     
     /// Caches a new connection with the specified cache key.
@@ -237,29 +227,24 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
     /// let connection = ChildChannelService(...)
     /// await cache.cacheConnection(connection, for: "api-server")
     /// ```
-    func cacheConnection(_ connection: ChildChannelService<Inbound, Outbound>, for cacheKey: String) {
-        // Check if we need to evict due to capacity
-        if connections.count >= configuration.maxConnections {
-            evictLRUConnection()
+    func cacheConnection(_ connection: ChildChannelService<Inbound, Outbound>, for cacheKey: String) async {
+        guard !isRemovingAllConnections else {
+            try? await connection.shutdown()
+            return
         }
-        
-        // Remove existing connection if it exists
+
+        let connectionToClose: ChildChannelService<Inbound, Outbound>?
+
+        // Replacing a key does not consume additional capacity.
         if let existingConnection = connections[cacheKey] {
-            Task { [weak self] in
-                guard let self else { return }
-                do {
-                    try await existingConnection.shutdown()
-                } catch {
-                    self.logger.log(level: .error, message: "Failed to shutdown existing connection \(error)")
-                }
-            }
+            connectionToClose = existingConnection
             removeFromLRU(cacheKey)
-            
-            // Notify connection manager about connection replacement
-            onConnectionRemoved?()
+        } else if connections.count >= configuration.maxConnections {
+            connectionToClose = evictOldestConnection()
+        } else {
+            connectionToClose = nil
         }
         
-        // Add new connection
         connections[cacheKey] = connection
         addToLRU(cacheKey)
         
@@ -277,6 +262,16 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
         // Set timestamp for TTL tracking
         if configuration.ttl != nil {
             timestamps[cacheKey] = .now
+        }
+
+        await onConnectionCountChanged?(connections.count)
+
+        if let connectionToClose {
+            do {
+                try await connectionToClose.shutdown()
+            } catch {
+                logger.log(level: .error, message: "Failed to shutdown replaced connection \(error)")
+            }
         }
         
         logger.log(level: .info, message: "Cached connection for cacheKey: \(cacheKey)")
@@ -297,7 +292,7 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
     /// let updatedConnection = ChildChannelService(...)
     /// await cache.updateConnection(updatedConnection, for: "api-server")
     /// ```
-    func updateConnection(_ connection: ChildChannelService<Inbound, Outbound>, for cacheKey: String) {
+    func updateConnection(_ connection: ChildChannelService<Inbound, Outbound>, for cacheKey: String) async {
         if connections[cacheKey] != nil {
             connections[cacheKey] = connection
             updateLRU(cacheKey)
@@ -310,7 +305,7 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
             logger.log(level: .info, message: "Updated connection for cacheKey: \(cacheKey)")
         } else {
             logger.log(level: .info, message: "No existing connection found for cacheKey: \(cacheKey). Caching new connection instead.")
-            cacheConnection(connection, for: cacheKey)
+            await cacheConnection(connection, for: cacheKey)
         }
     }
     
@@ -333,10 +328,10 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
     ///     print("No connection found for api-server")
     /// }
     /// ```
-    func findConnection(cacheKey: String) -> ChildChannelService<Inbound, Outbound>? {
+    func findConnection(cacheKey: String) async -> ChildChannelService<Inbound, Outbound>? {
         // Check if connection exists
         guard let connection = connections[cacheKey] else {
-            logger.log(level: .info, message: "No connection found for cacheKey: \(cacheKey)")
+            logger.log(level: .debug, message: "No connection found for cacheKey: \(cacheKey)")
             cacheMissesCounter.increment()
             metricsDelegate?.cacheMissDidOccur(cacheKey: cacheKey)
             return nil
@@ -349,18 +344,15 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
                 logger.log(level: .info, message: "Connection expired for cacheKey: \(cacheKey)")
                 cacheTTLExpirationsCounter.increment()
                 metricsDelegate?.connectionDidExpire(cacheKey: cacheKey)
-                Task { [weak self] in
-                    guard let self else { return }
-                    do {
-                        try await connection.shutdown()
-                    } catch {
-                        self.logger.log(level: .error, message: "Failed to shutdown existing connection \(error)")
-                    }
-                }
                 connections[cacheKey] = nil
                 removeFromLRU(cacheKey)
                 timestamps[cacheKey] = nil
                 cachedConnectionsGauge.record(connections.count)
+                do {
+                    try await connection.shutdown()
+                } catch {
+                    logger.log(level: .error, message: "Failed to shutdown expired connection \(error)")
+                }
                 
                 // Notify delegate of metrics update
                 metricsDelegate?.cacheMetricsDidUpdate(
@@ -370,8 +362,7 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
                     ttlEnabled: configuration.ttl != nil
                 )
                 
-                // Notify connection manager about expired connection removal
-                onConnectionRemoved?()
+                await onConnectionCountChanged?(connections.count)
                 return nil
             }
         }
@@ -381,7 +372,7 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
             updateLRU(cacheKey)
         }
         
-        logger.log(level: .info, message: "Found connection for cacheKey: \(cacheKey)")
+        logger.log(level: .debug, message: "Found connection for cacheKey: \(cacheKey)")
         cacheHitsCounter.increment()
         metricsDelegate?.cacheHitDidOccur(cacheKey: cacheKey)
         return connection
@@ -406,7 +397,6 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
     /// ```
     func removeConnection(_ cacheKey: String) async throws {
         if let foundConnection = connections[cacheKey] {
-            try await foundConnection.shutdown()
             connections[cacheKey] = nil
             removeFromLRU(cacheKey)
             timestamps[cacheKey] = nil
@@ -414,8 +404,8 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
             // Update Swift Metrics
             cachedConnectionsGauge.record(connections.count)
             
-            // Notify connection manager about connection removal
-            onConnectionRemoved?()
+            await onConnectionCountChanged?(connections.count)
+            try await foundConnection.shutdown()
             
             logger.log(level: .info, message: "Removed connection for cacheKey: \(cacheKey)")
         } else {
@@ -440,17 +430,34 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
     /// }
     /// ```
     func removeAllConnection() async throws {
-        // Shutdown all connections
-        for connection in connections.values {
-            try await connection.shutdown()
-        }
+        guard !isRemovingAllConnections else { return }
+        isRemovingAllConnections = true
+        defer { isRemovingAllConnections = false }
+
+        let connectionsToClose = Array(connections.values)
         
         connections.removeAll()
-        lruOrder.removeAll()
+        connectionOrder.removeAll()
+        connectionOrderHead = 0
+        currentGenerationByKey.removeAll()
         timestamps.removeAll()
         
-        // Notify connection manager about all connections being removed
-        onConnectionRemoved?()
+        cachedConnectionsGauge.record(0)
+        await onConnectionCountChanged?(0)
+
+        var firstError: Error?
+        for connection in connectionsToClose {
+            do {
+                try await connection.shutdown()
+            } catch {
+                if firstError == nil {
+                    firstError = error
+                }
+            }
+        }
+        if let firstError {
+            throw firstError
+        }
     }
     
     /// Fetches all connections currently in the cache.
@@ -507,17 +514,18 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
         
         for key in expiredKeys {
             if let connection = connections[key] {
-                try? await connection.shutdown()
                 connections[key] = nil
                 removeFromLRU(key)
                 timestamps[key] = nil
+                try? await connection.shutdown()
                 logger.log(level: .info, message: "Cleaned up expired connection for cacheKey: \(key)")
             }
         }
         
         // Notify connection manager about expired connections being removed
         if !expiredKeys.isEmpty {
-            onConnectionRemoved?()
+            cachedConnectionsGauge.record(connections.count)
+            await onConnectionCountChanged?(connections.count)
         }
     }
     
@@ -525,145 +533,73 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
     
     /// Adds a key to the LRU order.
     private func addToLRU(_ key: String) {
-        guard configuration.enableLRU else { return }
-        lruOrder.append(key)
+        orderGeneration &+= 1
+        currentGenerationByKey[key] = orderGeneration
+        connectionOrder.append(OrderEntry(key: key, generation: orderGeneration))
     }
     
     /// Updates a key's position in the LRU order (moves to end).
     private func updateLRU(_ key: String) {
         guard configuration.enableLRU else { return }
-        removeFromLRU(key)
-        lruOrder.append(key)
+        addToLRU(key)
     }
     
     /// Removes a key from the LRU order.
     private func removeFromLRU(_ key: String) {
-        guard configuration.enableLRU else { return }
-        lruOrder.removeAll { $0 == key }
+        currentGenerationByKey[key] = nil
     }
     
     /// Evicts the least recently used connection.
-    private func evictLRUConnection() {
-        guard configuration.enableLRU, let oldestKey = lruOrder.first else { return }
-        
-        if let connection = connections[oldestKey] {
-            Task { [weak self] in
-                guard let self else { return }
-                do {
-                    try await connection.shutdown()
-                } catch {
-                    self.logger.log(level: .error, message: "Failed to shutdown existing connection \(error)")
-                }
+    private func evictOldestConnection() -> ChildChannelService<Inbound, Outbound>? {
+        while connectionOrderHead < connectionOrder.count {
+            let entry = connectionOrder[connectionOrderHead]
+            connectionOrderHead += 1
+
+            guard currentGenerationByKey[entry.key] == entry.generation else {
+                continue
             }
-            connections[oldestKey] = nil
-            removeFromLRU(oldestKey)
-            timestamps[oldestKey] = nil
-            
-            // Update Swift Metrics
+
+            currentGenerationByKey[entry.key] = nil
+            let connection = connections.removeValue(forKey: entry.key)
+            timestamps[entry.key] = nil
+
             cacheEvictionsCounter.increment()
             cachedConnectionsGauge.record(connections.count)
-            
-            // Notify delegate
-            metricsDelegate?.connectionDidEvict(cacheKey: oldestKey)
+            metricsDelegate?.connectionDidEvict(cacheKey: entry.key)
             metricsDelegate?.cacheMetricsDidUpdate(
                 cachedConnections: connections.count,
                 maxConnections: configuration.maxConnections,
                 lruEnabled: configuration.enableLRU,
                 ttlEnabled: configuration.ttl != nil
             )
-            
-            // Notify connection manager about connection removal
-            onConnectionRemoved?()
-            
-            logger.log(level: .info, message: "Evicted LRU connection for cacheKey: \(oldestKey)")
+
+            compactConnectionOrderIfNeeded()
+            logger.log(level: .info, message: "Evicted oldest connection for cacheKey: \(entry.key)")
+            return connection
         }
-    }
-    
-    // MARK: - Connection Pooling Methods
-    
-    /// Acquires a connection from the pool for a specific cache key.
-    ///
-    /// This method attempts to find an available connection in the pool. If no connection
-    /// is available and the pool hasn't reached its maximum size, it will create a new one.
-    ///
-    /// - Parameters:
-    ///   - cacheKey: The unique key used to identify the connection.
-    ///   - poolConfig: The connection pool configuration.
-    ///   - connectionFactory: A closure that creates a new connection if needed.
-    /// - Returns: A connection from the pool, or `nil` if acquisition times out.
-    /// - Throws: An error if the connection cannot be acquired or created.
-    func acquireConnection(
-        for cacheKey: String,
-        poolConfig: ConnectionPoolConfiguration,
-        connectionFactory: @escaping () async throws -> ChildChannelService<Inbound, Outbound>
-    ) async throws -> ChildChannelService<Inbound, Outbound>? {
-        // First, try to find an existing available connection
-        if let existingConnection = connections[cacheKey] {
-            return existingConnection
-        }
-        
-        // If no connection exists and we haven't reached the pool limit, create a new one
-        if connections.count < poolConfig.maxConnections {
-            let newConnection = try await connectionFactory()
-            connections[cacheKey] = newConnection
-            return newConnection
-        }
-        
-        // Pool is full, wait for a connection to become available
-        let startTime = TimeAmount.now
-        while TimeAmount.now - startTime < poolConfig.acquireTimeout {
-            // Check if any connection has become available
-            if let availableConnection = connections[cacheKey] {
-                return availableConnection
-            }
-            
-            // Wait a bit before checking again
-            try await Task.sleep(for: Duration.nanoseconds(TimeAmount.milliseconds(100).nanoseconds))
-        }
-        
-        // Timeout reached
+
+        compactConnectionOrderIfNeeded()
         return nil
     }
-    
-    /// Returns a connection to the pool.
-    ///
-    /// This method marks a connection as available for reuse. If the connection
-    /// has exceeded its idle time, it will be removed from the pool.
-    ///
-    /// - Parameters:
-    ///   - cacheKey: The unique key used to identify the connection.
-    ///   - poolConfig: The connection pool configuration.
-    func returnConnection(
-        _ cacheKey: String,
-        poolConfig: ConnectionPoolConfiguration
-    ) async {
-        // Check if connection has exceeded idle time
-        if let timestamp = timestamps[cacheKey] {
-            let now = TimeAmount.now
-            if now - timestamp > poolConfig.maxIdleTime {
-                // Connection has been idle too long, remove it
-                if let connection = connections[cacheKey] {
-                    try? await connection.shutdown()
-                }
-                connections[cacheKey] = nil
-                removeFromLRU(cacheKey)
-                timestamps[cacheKey] = nil
-                
-                // Notify connection manager about idle connection removal
-                onConnectionRemoved?()
-                
-                logger.log(level: .info, message: "Removed idle connection for cacheKey: \(cacheKey)")
-            }
+
+    private func compactConnectionOrderIfNeeded() {
+        guard
+            connectionOrderHead >= 256,
+            connectionOrderHead * 2 >= connectionOrder.count
+        else {
+            return
         }
+        connectionOrder.removeFirst(connectionOrderHead)
+        connectionOrderHead = 0
     }
 }
 
 // MARK: - TimeAmount Extension for TTL Support
 
 extension TimeAmount {
-    /// The current time as a TimeAmount (approximate).
+    /// Monotonic uptime used for elapsed-time calculations.
     static var now: TimeAmount {
-        return .nanoseconds(Int64(Date().timeIntervalSince1970 * 1_000_000_000))
+        .nanoseconds(Int64(clamping: NIODeadline.now().uptimeNanoseconds))
     }
     
     /// Creates a TimeAmount from milliseconds.

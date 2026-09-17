@@ -39,6 +39,13 @@ protocol ChildChannelServiceDelegate: Sendable {
     ///
     /// - Parameter context: The channel context containing the initialized channel and its metadata.
     func initializedChildChannel<Outbound: Sendable, Inbound: Sendable>(_ context: ChannelContext<Inbound, Outbound>) async where Outbound : Sendable, Inbound : Sendable
+
+    /// Called after a child channel's run scope has ended.
+    func childChannelDidClose(id: String) async
+}
+
+extension ChildChannelServiceDelegate {
+    func childChannelDidClose(id: String) async {}
 }
 
 /// A protocol for handling connection-level events and network state changes.

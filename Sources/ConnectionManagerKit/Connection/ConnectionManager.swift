@@ -20,7 +20,6 @@ import NIOPosix
 import NIOSSL
 import NIOHTTP1
 import NIOWebSocket
-import ServiceLifecycle
 import NeedleTailLogger
 import Metrics
 
@@ -232,10 +231,17 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     /// The event loop group used for network operations.
     private let group: EventLoopGroup
     
-    /// The service group for managing connection lifecycle.
-    private var serviceGroup: ServiceGroup?
-    /// Background task that runs the service lifecycle without blocking connect calls.
-    private var serviceLifecycleTask: Task<Void, Never>?
+    private struct ConnectionRun {
+        let cacheKey: String
+        let task: Task<Void, Never>
+    }
+
+    /// Every cached service owns exactly one run task. Runs are keyed by a token so a
+    /// replaced service can finish without removing its replacement's task.
+    private var connectionRuns: [UUID: ConnectionRun] = [:]
+    private var currentRunTokenByCacheKey: [String: UUID] = [:]
+    private var isShuttingDown = false
+    private var cacheMetricsCallbackInstalled = false
     /// Optional WebSocket configuration applied to all connections created by this manager.
     public nonisolated(unsafe) var webSocketOptions: WebSocketOptions?
     private nonisolated(unsafe) var enabledWebsocket: Bool = false
@@ -260,8 +266,10 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     private let averageConnectionTimeGauge = Gauge(label: "connection_manager_average_connection_time_ns", dimensions: [("component", "connection_manager")])
     private let connectionAttemptsCounter = Counter(label: "connection_manager_connection_attempts", dimensions: [("component", "connection_manager")])
     
-    // Minimal state for internal calculations and delegate notifications
-    private var connectionTimes: [TimeAmount] = []
+    // O(1) connection metrics.
+    private var totalConnectionsEstablished = 0
+    private var activeConnectionsCount = 0
+    private var totalConnectionTimeNanoseconds: Int64 = 0
     private var failedConnectionsCount: Int = 0
     
     // MARK: - Metrics Helper Methods
@@ -273,28 +281,20 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     
     /// Updates metrics when a connection succeeds
     private func updateMetricsOnConnectionSuccess(serverLocation: String, connectionTime: TimeAmount) {
-        connectionTimes.append(connectionTime)
+        totalConnectionsEstablished += 1
+        totalConnectionTimeNanoseconds += connectionTime.nanoseconds
+        let averageTime = totalConnectionTimeNanoseconds / Int64(totalConnectionsEstablished)
         
-        // Update Swift Metrics
-        totalConnectionsGauge.record(Double(connectionTimes.count))
-        activeConnectionsGauge.record(Double(connectionTimes.count))
+        totalConnectionsGauge.record(Double(totalConnectionsEstablished))
+        activeConnectionsGauge.record(Double(activeConnectionsCount))
         successfulConnectionsCounter.increment()
-        
-        // Calculate and record average connection time
-        let totalTime = connectionTimes.reduce(TimeAmount.seconds(0)) { $0 + $1 }
-        let averageTime = totalTime.nanoseconds / Int64(connectionTimes.count)
         averageConnectionTimeGauge.record(Double(averageTime))
-        
-        // Notify delegate with calculated values
-        let totalConnections = connectionTimes.count
-        let activeConnections = connectionTimes.count
-        let failedConnections = failedConnectionsCount
         
         metricsDelegate?.connectionDidSucceed(serverLocation: serverLocation, connectionTime: connectionTime)
         metricsDelegate?.connectionManagerMetricsDidUpdate(
-            totalConnections: totalConnections,
-            activeConnections: activeConnections,
-            failedConnections: failedConnections,
+            totalConnections: totalConnectionsEstablished,
+            activeConnections: activeConnectionsCount,
+            failedConnections: failedConnectionsCount,
             averageConnectionTime: .nanoseconds(averageTime)
         )
     }
@@ -306,63 +306,55 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         // Update Swift Metrics
         failedConnectionsCounter.increment()
         
-        // Notify delegate with calculated values
-        let totalConnections = connectionTimes.count
-        let activeConnections = connectionTimes.count
-        let failedConnections = failedConnectionsCount
-        let averageTime = connectionTimes.isEmpty ? 0 : connectionTimes.reduce(TimeAmount.seconds(0)) { $0 + $1 }.nanoseconds / Int64(connectionTimes.count)
+        let averageTime = totalConnectionsEstablished == 0
+            ? 0
+            : totalConnectionTimeNanoseconds / Int64(totalConnectionsEstablished)
         
         metricsDelegate?.connectionDidFail(serverLocation: serverLocation, error: error, attemptNumber: attemptNumber)
         metricsDelegate?.connectionManagerMetricsDidUpdate(
-            totalConnections: totalConnections,
-            activeConnections: activeConnections,
-            failedConnections: failedConnections,
+            totalConnections: totalConnectionsEstablished,
+            activeConnections: activeConnectionsCount,
+            failedConnections: failedConnectionsCount,
             averageConnectionTime: .nanoseconds(averageTime)
         )
     }
     
-    /// Updates metrics when a connection is closed
-    internal func updateMetricsOnConnectionClose() {
-        // Update Swift Metrics (decrement active connections)
-        let newActiveCount = max(0, connectionTimes.count - 1)
-        activeConnectionsGauge.record(Double(newActiveCount))
-        
-        // Notify delegate with calculated values
-        let totalConnections = connectionTimes.count
-        let activeConnections = newActiveCount
-        let failedConnections = failedConnectionsCount
-        let averageTime = connectionTimes.isEmpty ? 0 : connectionTimes.reduce(TimeAmount.seconds(0)) { $0 + $1 }.nanoseconds / Int64(connectionTimes.count)
+    private func updateActiveConnectionCount(_ count: Int) {
+        activeConnectionsCount = count
+        activeConnectionsGauge.record(Double(count))
+        let averageTime = totalConnectionsEstablished == 0
+            ? 0
+            : totalConnectionTimeNanoseconds / Int64(totalConnectionsEstablished)
         
         metricsDelegate?.connectionManagerMetricsDidUpdate(
-            totalConnections: totalConnections,
-            activeConnections: activeConnections,
-            failedConnections: failedConnections,
+            totalConnections: totalConnectionsEstablished,
+            activeConnections: count,
+            failedConnections: failedConnectionsCount,
             averageConnectionTime: .nanoseconds(averageTime)
         )
     }
     
     /// Resets all metrics counters
     public func resetMetrics() {
-        connectionTimes.removeAll()
+        totalConnectionsEstablished = 0
+        totalConnectionTimeNanoseconds = 0
         failedConnectionsCount = 0
         
-        // Reset Swift Metrics (note: Swift Metrics doesn't have a reset method, so we set to 0)
         totalConnectionsGauge.record(0)
-        activeConnectionsGauge.record(0)
+        activeConnectionsGauge.record(Double(activeConnectionsCount))
         averageConnectionTimeGauge.record(0)
     }
     
     /// Returns current metrics for consumer logging/processing
     public func getCurrentMetrics() -> (totalConnections: Int, activeConnections: Int, failedConnections: Int, averageConnectionTime: TimeAmount) {
-        let totalConnections = connectionTimes.count
-        let activeConnections = connectionTimes.count
-        let failedConnections = failedConnectionsCount
-        let averageTime = connectionTimes.isEmpty ? 0 : connectionTimes.reduce(TimeAmount.seconds(0)) { $0 + $1 }.nanoseconds / Int64(connectionTimes.count)
+        let averageTime = totalConnectionsEstablished == 0
+            ? 0
+            : totalConnectionTimeNanoseconds / Int64(totalConnectionsEstablished)
         
         return (
-            totalConnections: totalConnections,
-            activeConnections: activeConnections,
-            failedConnections: failedConnections,
+            totalConnections: totalConnectionsEstablished,
+            activeConnections: activeConnectionsCount,
+            failedConnections: failedConnectionsCount,
             averageConnectionTime: .nanoseconds(averageTime)
         )
     }
@@ -425,25 +417,21 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     /// ```
     public init(
         logger: NeedleTailLogger = NeedleTailLogger(),
-        transportOptions: TCPTransportOptions = .init()
+        transportOptions: TCPTransportOptions = .init(),
+        cacheConfiguration: CacheConfiguration = .init()
     ) {
         self.logger = logger
         self.transportOptions = transportOptions
-        self.connectionCache = ConnectionCache<Inbound, Outbound>(logger: logger)
+        self.connectionCache = ConnectionCache(
+            logger: logger,
+            configuration: cacheConfiguration
+        )
 #if canImport(Network)
         self.group = NIOTSEventLoopGroup.singleton
 #else
         self.group = MultiThreadedEventLoopGroup.singleton
 #endif
         
-        // Set up callback to update metrics when connections are removed from cache
-        Task {
-            await connectionCache.setConnectionRemovedCallback { [weak self] in
-                Task { [weak self] in
-                    await self?.updateMetricsOnConnectionClose()
-                }
-            }
-        }
     }
     
     /// Connects to a list of server locations with advanced configuration options.
@@ -489,20 +477,6 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                 timeout: timeout,
                 tlsPreKeyed: tlsPreKeyed,
                 retryStrategy: retryStrategy)
-        }
-        
-        if serviceGroup == nil {
-            serviceGroup = await ServiceGroup(
-                services: connectionCache.fetchAllConnections(),
-                logger: .init(label: "Connection Manager"))
-            let group = serviceGroup
-            serviceLifecycleTask = Task {
-                do {
-                    try await group?.run()
-                } catch {
-                    // Intentionally ignore; shutdown is coordinated via gracefulShutdown
-                }
-            }
         }
     }
     
@@ -586,20 +560,6 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                 tlsPreKeyed: tlsPreKeyed,
                 retryStrategy: retryStrategy)
         }
-        
-        if serviceGroup == nil {
-            serviceGroup = await ServiceGroup(
-                services: connectionCache.fetchAllConnections(),
-                logger: .init(label: "Connection Manager"))
-            let group = serviceGroup
-            serviceLifecycleTask = Task {
-                do {
-                    try await group?.run()
-                } catch {
-                    // Intentionally ignore; shutdown is coordinated via gracefulShutdown
-                }
-            }
-        }
     }
     
     /// Attempts to connect to a specified server with retry logic.
@@ -624,6 +584,9 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         tlsPreKeyed: TLSPreKeyedConfiguration? = nil,
         retryStrategy: RetryStrategy
     ) async throws {
+        await ensureCacheMetricsCallback()
+        guard !isShuttingDown else { throw CancellationError() }
+
         // Track connection attempt
         updateMetricsOnConnectionAttempt()
         
@@ -636,27 +599,48 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                 group: self.group,
                 timeout: timeout,
                 tlsPreKeyed: tlsPreKeyed)
+
+            guard !isShuttingDown else {
+                try? await childChannel.channel.close()
+                throw CancellationError()
+            }
             
             let connectionTime = TimeAmount.now - startTime
+            let monitor: NetworkEventMonitor
+            do {
+                monitor = try await childChannel.channel.pipeline.handler(
+                    type: NetworkEventMonitor.self
+                ).get()
+            } catch {
+                try? await childChannel.channel.close()
+                throw error
+            }
             
-            await connectionCache.cacheConnection(
-                .init(
-                    logger: logger,
-                    config: server,
-                    childChannel: childChannel,
-                    delegate: self), for: server.cacheKey)
+            let service = ChildChannelService(
+                logger: logger,
+                config: server,
+                childChannel: childChannel,
+                delegate: self
+            )
+            retireConnectionRun(cacheKey: server.cacheKey)
+            await connectionCache.cacheConnection(service, for: server.cacheKey)
             
             await delegate?.channelCreated(childChannel.channel.eventLoop, cacheKey: server.cacheKey)
             
-            let monitor = try await childChannel.channel.pipeline.handler(type: NetworkEventMonitor.self).get()
             if let foundConnection = await connectionCache.findConnection(cacheKey: server.cacheKey) {
                 await delegateMonitorEvents(monitor: monitor, server: foundConnection.config)
             }
+
+            startConnectionService(service, cacheKey: server.cacheKey)
             
             // Track successful connection
             updateMetricsOnConnectionSuccess(serverLocation: server.cacheKey, connectionTime: connectionTime)
             
         } catch {
+            if isShuttingDown || error is CancellationError {
+                throw error
+            }
+
             // Track failed connection
             updateMetricsOnConnectionFailure(serverLocation: server.cacheKey, error: error, attemptNumber: currentAttempt + 1)
             
@@ -676,21 +660,6 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                     timeout: timeout,
                     tlsPreKeyed: tlsPreKeyed,
                     retryStrategy: retryStrategy)
-                
-                if serviceGroup == nil {
-                    serviceGroup = await ServiceGroup(
-                        services: connectionCache.fetchAllConnections(),
-                        logger: .init(label: "Connection Manager"))
-                    let group = serviceGroup
-                    serviceLifecycleTask = Task {
-                        do {
-                            try await group?.run()
-                        } catch {
-                            // Intentionally ignore; shutdown is coordinated via gracefulShutdown
-                        }
-                    }
-                }
-                
             } else {
                 _shouldReconnect = false
                 // If max attempts reached, rethrow the error
@@ -725,6 +694,14 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
             
         case .custom(let calculator):
             return calculator(attempt, maxAttempts)
+        }
+    }
+
+    private func ensureCacheMetricsCallback() async {
+        guard !cacheMetricsCallbackInstalled else { return }
+        cacheMetricsCallbackInstalled = true
+        await connectionCache.setConnectionCountChangedCallback { [weak self] count in
+            await self?.updateActiveConnectionCount(count)
         }
     }
     
@@ -978,20 +955,6 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                 tlsPreKeyed: tlsPreKeyed,
                 retryStrategy: retryStrategy)
         }
-        
-        if serviceGroup == nil {
-            serviceGroup = await ServiceGroup(
-                services: connectionCache.fetchAllConnections(),
-                logger: .init(label: "Connection Manager"))
-            let group = serviceGroup
-            serviceLifecycleTask = Task {
-                do {
-                    try await group?.run()
-                } catch {
-                    // Intentionally ignore; shutdown is coordinated via gracefulShutdown
-                }
-            }
-        }
     }
     
     enum UpgradeResult {
@@ -1018,6 +981,71 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
             server.contextDelegate?.channelInactive(channelInactiveStream, id: monitor.connectionIdentifier)
         }
     }
+
+    private func startConnectionService(
+        _ service: ChildChannelService<Inbound, Outbound>,
+        cacheKey: String
+    ) {
+        guard !isShuttingDown else { return }
+
+        let token = UUID()
+        let logger = self.logger
+        let task = Task { [weak self, service] in
+            do {
+                try await service.run()
+            } catch {
+                // A closed-channel error after we intentionally closed the channel
+                // (shutdown, replacement, or eviction) is the expected end of the run.
+                let intentionalClose = await self?.isShuttingDown ?? true
+                let closedChannel: Bool
+                if let channelError = error as? ChannelError, case .ioOnClosedChannel = channelError {
+                    closedChannel = true
+                } else {
+                    closedChannel = false
+                }
+                if Task.isCancelled || intentionalClose || closedChannel {
+                    logger.log(
+                        level: .debug,
+                        message: "Connection service \(cacheKey) finished: \(error)"
+                    )
+                } else {
+                    logger.log(
+                        level: .error,
+                        message: "Connection service \(cacheKey) stopped with error: \(error)"
+                    )
+                }
+            }
+            await self?.connectionServiceDidFinish(token: token, cacheKey: cacheKey)
+        }
+
+        connectionRuns[token] = ConnectionRun(cacheKey: cacheKey, task: task)
+        currentRunTokenByCacheKey[cacheKey] = token
+    }
+
+    private func retireConnectionRun(cacheKey: String) {
+        guard let token = currentRunTokenByCacheKey.removeValue(forKey: cacheKey) else {
+            return
+        }
+        connectionRuns[token]?.task.cancel()
+    }
+
+    private func connectionServiceDidFinish(token: UUID, cacheKey: String) async {
+        connectionRuns[token] = nil
+        guard currentRunTokenByCacheKey[cacheKey] == token else {
+            return
+        }
+        currentRunTokenByCacheKey[cacheKey] = nil
+        // gracefulShutdown() already emptied the cache.
+        guard !isShuttingDown else { return }
+        do {
+            try await connectionCache.removeConnection(cacheKey)
+        } catch {
+            logger.log(
+                level: .error,
+                message: "Failed to remove finished connection \(cacheKey): \(error)"
+            )
+        }
+    }
     
     /// Gracefully shuts down the connection manager and cleans up resources.
     ///
@@ -1030,21 +1058,24 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     /// await manager.gracefulShutdown()
     /// ```
     public func gracefulShutdown() async {
+        isShuttingDown = true
         do {
-            await serviceGroup?.triggerGracefulShutdown()
             try await connectionCache.removeAllConnection()
-            // Update metrics after removing all connections
-            updateMetricsOnConnectionClose()
-            logger.log(level: .info, message: "Gracefully shut down service and removed connections from cache.")
         } catch {
-            logger.log(level: .error, message: "Error shutting down connection group: \(error)")
-            await serviceGroup?.triggerGracefulShutdown()
+            logger.log(level: .error, message: "Error shutting down connections: \(error)")
         }
-        let task = serviceLifecycleTask
-        serviceLifecycleTask = nil
-        await task?.value
-        serviceGroup = nil
+
+        let runs = connectionRuns.values.map(\.task)
+        for task in runs {
+            await task.value
+        }
+        connectionRuns.removeAll()
+        currentRunTokenByCacheKey.removeAll()
+
         _shouldReconnect = false
+        // Shutdown is complete; the manager may be reused for new connections.
+        isShuttingDown = false
+        logger.log(level: .info, message: "Gracefully shut down services and removed connections from cache.")
     }
     
     /// Connects to a list of server locations with parallel processing.

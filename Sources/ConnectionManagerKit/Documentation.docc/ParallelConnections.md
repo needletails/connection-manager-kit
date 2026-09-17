@@ -294,30 +294,17 @@ let connections = try await manager.connectParallel(
 )
 ```
 
-### Connection Pooling Integration
+### Connection Cache Integration
 
 ```swift
-// Use parallel connections with connection pooling
-let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
+let manager = ConnectionManager<ByteBuffer, ByteBuffer>(
+    cacheConfiguration: .init(maxConnections: 10, enableLRU: true)
+)
 
-// Establish connections in parallel
-let connections = try await manager.connectParallel(
+try await manager.connectParallel(
     to: servers,
     maxConcurrentConnections: 5
 )
-
-// Use pooled connections for operations
-let poolConfig = ConnectionPoolConfiguration(maxPoolSize: 10)
-
-for server in servers {
-    let connection = await manager.connectionCache.acquireConnection(
-        for: server.cacheKey,
-        poolConfiguration: poolConfig
-    )
-    
-    // Use connection
-    await manager.connectionCache.returnConnection(connection, for: server.cacheKey)
-}
 ```
 
 ## Error Handling
@@ -391,7 +378,7 @@ let connections = try await manager.connectParallel(
 // All microservices are now connected and ready
 ```
 
-### Database Connection Pool
+### Database Replicas
 
 ```swift
 // Connect to multiple database replicas

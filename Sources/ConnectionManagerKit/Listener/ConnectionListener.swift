@@ -29,11 +29,11 @@ public struct ListenerConfiguration: Sendable {
     public let acceptTimeout: TimeAmount
     /// Whether to enable connection monitoring.
     public let enableConnectionMonitoring: Bool
-    /// Whether to enable automatic recovery on errors.
+    /// Legacy compatibility setting. Listener rebinding is not automated.
     public let enableAutoRecovery: Bool
-    /// Maximum number of recovery attempts.
+    /// Legacy recovery-attempt setting.
     public let maxRecoveryAttempts: Int
-    /// Recovery delay between attempts.
+    /// Legacy recovery-delay setting.
     public let recoveryDelay: TimeAmount
     
     public init(
@@ -65,7 +65,7 @@ public struct ListenerMetrics: Sendable {
     public var acceptRate: Double
     /// Average connection duration.
     public var averageConnectionDuration: TimeAmount
-    /// Number of recovery attempts.
+    /// Legacy recovery count. Automatic listener recovery is not performed.
     public var recoveryAttempts: Int
     /// Number of connection errors.
     public var connectionErrors: Int
@@ -108,7 +108,7 @@ public protocol ListenerMetricsDelegate: AnyObject, Sendable {
     ///   - duration: The duration the connection was active
     func connectionDidClose(connectionId: String, activeConnections: Int, duration: TimeAmount)
     
-    /// Called when recovery is attempted
+    /// Legacy callback retained for source compatibility.
     /// - Parameters:
     ///   - attemptNumber: The current recovery attempt number
     ///   - maxAttempts: The maximum number of recovery attempts
@@ -134,8 +134,6 @@ public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceL
     // Optimization: Add configuration and metrics
     private let configuration: ListenerConfiguration
     private var metrics: ListenerMetrics
-    private var isShuttingDown = false
-    private var recoveryTask: Task<Void, Never>?
     
     // Performance monitoring
     private var connectionStartTimes: [String: TimeAmount] = [:]
@@ -148,7 +146,6 @@ public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceL
     private let totalConnectionsClosedCounter = Counter(label: "connection_listener_total_connections_closed", dimensions: [("component", "listener")])
     private let acceptRateGauge = Gauge(label: "connection_listener_accept_rate", dimensions: [("component", "listener")])
     private let averageConnectionDurationGauge = Gauge(label: "connection_listener_average_connection_duration_ns", dimensions: [("component", "listener")])
-    private let recoveryAttemptsCounter = Counter(label: "connection_listener_recovery_attempts", dimensions: [("component", "listener")])
     private let connectionErrorsCounter = Counter(label: "connection_listener_connection_errors", dimensions: [("component", "listener")])
     
     nonisolated func retrieveSSLHandler() -> NIOSSL.NIOSSLServerHandler? {
@@ -278,119 +275,19 @@ public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceL
         serviceGroup = ServiceGroup(
             services: [serverService],
             logger: .init(label: "[Listener Service Group]"))
-        
-        // Start monitoring task if enabled
-        if self.configuration.enableConnectionMonitoring {
-            startMonitoringTask()
-        }
-        
-        // Start with auto-recovery if enabled
-        if self.configuration.enableAutoRecovery {
-            startRecoveryTask()
-        }
-        
-        try await serverService.run()
+
+        try await serviceGroup?.run()
     }
     
     public func shutdownChildChannel(id: String) async {
         await serverService?.shutdownChildChannel(id: id)
-        updateMetricsOnConnectionClose(id: id)
     }
     
     public func shutdown() async throws {
-        isShuttingDown = true
-        
-        // Cancel monitoring and recovery tasks
-        recoveryTask?.cancel()
-        
+        await serviceGroup?.triggerGracefulShutdown()
         try await serverService?.shutdown()
         
         logger.log(level: .info, message: "Listener shutdown complete. Final metrics: \(metrics)")
-    }
-    
-    // MARK: - Performance Monitoring
-    
-    private func startMonitoringTask() {
-        Task { [weak self] in
-            guard let self else { return }
-            while true {
-                let isShuttingDown = await self.isShuttingDown
-                if isShuttingDown { break }
-                
-                await self.updateAcceptRate()
-                // Let consumer decide if/when to log metrics
-                try? await Task.sleep(for: .seconds(10))
-            }
-        }
-    }
-    
-    private func startRecoveryTask() {
-        recoveryTask = Task { [weak self] in
-            guard let self else { return }
-            var recoveryAttempts = 0
-            
-            while true {
-                let isShuttingDown = await self.isShuttingDown
-                let maxAttempts = self.configuration.maxRecoveryAttempts
-                
-                if isShuttingDown || recoveryAttempts >= maxAttempts { break }
-                
-                // Monitor for listener-level issues and attempt recovery
-                if await self.shouldAttemptRecovery() {
-                    recoveryAttempts += 1
-                    
-                    await self.recordRecoveryAttempt(recoveryAttempts)
-                    
-                    // Notify delegate
-                    await self.metricsDelegate?.recoveryDidAttempt(attemptNumber: recoveryAttempts, maxAttempts: maxAttempts)
-                    await self.metricsDelegate?.listenerMetricsDidUpdate(await self.metrics)
-                    
-                    self.logger.log(level: .warning, message: "Listener health check triggered after connection error (attempt \(recoveryAttempts)/\(maxAttempts))")
-                    
-                    do {
-                        try await self.performRecovery()
-                        self.logger.log(level: .info, message: "Listener health check completed")
-                        break
-                    } catch {
-                        self.logger.log(level: .error, message: "Listener health check failed: \(error)")
-                        
-                        if recoveryAttempts < maxAttempts {
-                            let recoveryDelay = self.configuration.recoveryDelay
-                            try? await Task.sleep(for: Duration.nanoseconds(recoveryDelay.nanoseconds))
-                        }
-                    }
-                } else {
-                    // If no recovery is needed, just wait and continue monitoring
-                    try? await Task.sleep(for: .seconds(30))
-                }
-            }
-            
-            // Log when recovery task exits
-            let finalIsShuttingDown = await self.isShuttingDown
-            if finalIsShuttingDown {
-                self.logger.log(level: .debug, message: "Listener health monitor stopped due to shutdown")
-            } else {
-                self.logger.log(level: .debug, message: "Listener health monitor stopped after \(recoveryAttempts) attempts")
-            }
-        }
-    }
-    
-    private func shouldAttemptRecovery() async -> Bool {
-        Self.shouldAttemptRecovery(metrics: metrics, configuration: configuration)
-    }
-    
-    static func shouldAttemptRecovery(metrics: ListenerMetrics, configuration: ListenerConfiguration) -> Bool {
-        // A listener that has cleanly closed all child connections is healthy and idle.
-        // Recovery is reserved for actual listener/connection error signals.
-        metrics.connectionErrors > 0 &&
-        metrics.activeConnections == 0 &&
-        metrics.totalConnectionsAccepted > 0 &&
-        metrics.recoveryAttempts < configuration.maxRecoveryAttempts
-    }
-    
-    private func performRecovery() async throws {
-        // Placeholder for future listener restart/rebind work. Today this is a health check.
-        logger.log(level: .info, message: "Performing listener health check")
     }
     
     private func updateMetricsOnConnectionAccept(id: String) {
@@ -407,6 +304,9 @@ public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceL
         acceptRateWindow.append(now)
         if acceptRateWindow.count > acceptRateWindowSize {
             acceptRateWindow.removeFirst()
+        }
+        if configuration.enableConnectionMonitoring {
+            updateAcceptRate()
         }
         
         // Notify delegate
@@ -469,13 +369,6 @@ public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceL
         metricsDelegate?.listenerMetricsDidUpdate(metrics)
     }
     
-    private func recordRecoveryAttempt(_ attemptNumber: Int) {
-        metrics.recoveryAttempts = attemptNumber
-        
-        // Update Swift Metrics
-        recoveryAttemptsCounter.increment()
-    }
-    
     /// Returns current metrics for consumer logging/processing
     public func getCurrentMetrics() -> ListenerMetrics {
         return metrics
@@ -506,5 +399,9 @@ extension ConnectionListener: ChildChannelServiceDelegate {
     func initializedChildChannel<OutboundType, InboundType>(_ context: ChannelContext<InboundType, OutboundType>) async where OutboundType : Sendable, InboundType : Sendable {
         updateMetricsOnConnectionAccept(id: context.id)
         await delegate?.initializedChildChannel(context)
+    }
+
+    func childChannelDidClose(id: String) async {
+        updateMetricsOnConnectionClose(id: id)
     }
 }

@@ -8,7 +8,7 @@ This guide will walk you through the process of creating your first network conn
 
 ## Requirements
 
-- Swift 6.0 or later
+- Swift 6.3 or later (validated with Swift 6.4)
 - iOS 17.0+, macOS 14.0+, tvOS 17.0+, watchOS 10.0+, or Linux
 
 ## Basic Setup

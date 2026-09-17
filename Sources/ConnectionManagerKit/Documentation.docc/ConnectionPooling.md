@@ -1,413 +1,72 @@
-# Connection Pooling
+# Connection Caching
 
-Efficiently manage and reuse network connections with configurable pooling strategies.
+Keep one live connection per cache key with bounded FIFO or LRU eviction.
 
 ## Overview
 
-Connection pooling in ConnectionManagerKit provides efficient connection reuse, reducing connection establishment overhead and improving application performance. The pooling system supports configurable pool sizes, timeouts, and automatic connection lifecycle management.
+ConnectionManagerKit provides a keyed connection cache. It does not provide multi-checkout
+pooling or acquire/return semantics. A successful connection is cached using the
+`ServerLocation.cacheKey`. Connecting again with the same key opens a new connection and
+replaces the cached entry; the previous connection for that key is shut down. Use
+`setDelegates(connectionDelegate:contextDelegate:cacheKey:)` to update an existing entry
+without reconnecting.
 
-## Key Benefits
-
-- **Reduced Latency**: Reuse existing connections instead of creating new ones
-- **Resource Efficiency**: Limit the number of concurrent connections
-- **Automatic Management**: Handle connection lifecycle and cleanup
-- **Configurable**: Adjust pool size and behavior for your use case
-- **Thread Safety**: Actor-based implementation for safe concurrent access
-- **Timeout Support**: Configurable acquisition and idle timeouts
-
-## Basic Usage
-
-### Acquiring Connections
+Configure the cache when creating a manager:
 
 ```swift
-let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
-
-// Acquire a connection from the pool
-let connection = try await manager.connectionCache.acquireConnection(
-    for: "api-server",
-    poolConfig: .init(maxConnections: 10)
-) {
-    // Connection factory - called when new connection needed
-    return try await createNewConnection()
-}
-
-// Use the connection
-// ... perform operations ...
-
-// Return the connection to the pool
-await manager.connectionCache.returnConnection(
-    "api-server",
-    poolConfig: .init(maxConnections: 10)
-)
-```
-
-### Pool Configuration
-
-```swift
-let poolConfig = ConnectionPoolConfiguration(
-    minConnections: 2,           // Minimum connections to maintain
-    maxConnections: 10,          // Maximum connections in pool
-    acquireTimeout: .seconds(5), // Timeout for acquiring connection
-    maxIdleTime: .seconds(30)    // How long connections can be idle
-)
-```
-
-## Advanced Usage
-
-### Connection Pooling with Retry
-
-```swift
-let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
-
-// Connect with retry strategy
-try await manager.connect(
-    to: servers,
-    retryStrategy: .exponential(initialDelay: .seconds(1))
-)
-
-// Use pooled connections with timeout
-let connection = try await manager.connectionCache.acquireConnection(
-    for: "server-key",
-    poolConfig: .init(
-        maxConnections: 5,
-        acquireTimeout: .seconds(10)
+let manager = ConnectionManager<ByteBuffer, ByteBuffer>(
+    cacheConfiguration: CacheConfiguration(
+        maxConnections: 50,
+        ttl: .seconds(300),
+        enableLRU: true
     )
-) {
-    return try await createConnection()
-}
-
-// Connection will be automatically retried if acquisition fails
-```
-
-### Pool Monitoring and Statistics
-
-```swift
-let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
-
-// Check pool state
-let isEmpty = await manager.connectionCache.isEmpty
-let count = await manager.connectionCache.count
-
-// Get all connections
-let allConnections = await manager.connectionCache.fetchAllConnections()
-print("Active connections: \(allConnections.count)")
-```
-
-### Custom Pool Behavior
-
-```swift
-// Configure different pools for different servers
-let apiPoolConfig = ConnectionPoolConfiguration(
-    maxConnections: 20,
-    acquireTimeout: .seconds(5)
-)
-
-let cachePoolConfig = ConnectionPoolConfiguration(
-    maxConnections: 5,
-    acquireTimeout: .seconds(2)
-)
-
-// Use different configurations
-let apiConnection = try await manager.connectionCache.acquireConnection(
-    for: "api-server",
-    poolConfig: apiPoolConfig
-) {
-    return try await createAPIConnection()
-}
-
-let cacheConnection = try await manager.connectionCache.acquireConnection(
-    for: "cache-server",
-    poolConfig: cachePoolConfig
-) {
-    return try await createCacheConnection()
-}
-```
-
-## Pool Configuration Options
-
-### ConnectionPoolConfiguration
-
-```swift
-struct ConnectionPoolConfiguration {
-    let minConnections: Int      // Minimum connections to maintain
-    let maxConnections: Int      // Maximum connections in pool
-    let acquireTimeout: TimeAmount // Timeout for acquiring connection
-    let maxIdleTime: TimeAmount  // Maximum idle time before cleanup
-}
-```
-
-### Default Configuration
-
-```swift
-// Default values
-let defaultConfig = ConnectionPoolConfiguration(
-    minConnections: 0,           // No minimum connections
-    maxConnections: 10,          // Maximum 10 connections
-    acquireTimeout: .seconds(30), // 30 second timeout
-    maxIdleTime: .seconds(300)   // 5 minute idle timeout
 )
 ```
 
-## Best Practices
+`maxConnections` is always enforced:
 
-### Choose Appropriate Pool Size
+- With `enableLRU: true`, successful lookups update access order and the least-recently-used
+  connection is evicted.
+- With `enableLRU: false`, insertion order is retained and the oldest connection is evicted.
 
-```swift
-// Small pool for limited resources
-let smallPool = ConnectionPoolConfiguration(
-    maxConnections: 3,
-    acquireTimeout: .seconds(10)
-)
+When `ttl` is set, a lookup closes and removes an expired connection before returning `nil`.
+Elapsed time uses a monotonic clock, so wall-clock changes do not alter expiration.
 
-// Large pool for high-throughput scenarios
-let largePool = ConnectionPoolConfiguration(
-    maxConnections: 50,
-    acquireTimeout: .seconds(5)
-)
-```
+## Cache Keys
 
-### Handle Connection Failures
+Use stable, unique keys for independent destinations:
 
 ```swift
-let connection = try await manager.connectionCache.acquireConnection(
-    for: "server-key",
-    poolConfig: .init(maxConnections: 10)
-) {
-    // Implement robust connection creation
-    do {
-        return try await createConnection()
-    } catch {
-        // Log error and potentially retry
-        logger.error("Failed to create connection: \(error)")
-        throw error
-    }
-}
-
-if let connection = connection {
-    // Use connection safely
-    try await performOperation(connection)
-    
-    // Always return to pool
-    await manager.connectionCache.returnConnection(
-        "server-key",
-        poolConfig: .init(maxConnections: 10)
+let servers = [
+    ServerLocation(
+        host: "api.example.com",
+        port: 443,
+        enableTLS: true,
+        cacheKey: "primary-api",
+        delegate: connectionDelegate,
+        contextDelegate: contextDelegate
+    ),
+    ServerLocation(
+        host: "events.example.com",
+        port: 443,
+        enableTLS: true,
+        cacheKey: "events",
+        delegate: eventConnectionDelegate,
+        contextDelegate: eventContextDelegate
     )
-} else {
-    // Handle acquisition failure
-    logger.error("Failed to acquire connection within timeout")
-}
+]
+
+try await manager.connectParallel(to: servers)
 ```
 
-### Connection Lifecycle Management
+Replacing or evicting an entry closes the old channel service. Calling
+`gracefulShutdown()` closes every cached connection and clears the cache.
 
-```swift
-// Reuse connections for multiple operations
-let connection = try await manager.connectionCache.acquireConnection(
-    for: "server-key",
-    poolConfig: .init(maxConnections: 10)
-) {
-    return try await createConnection()
-}
-
-// Perform multiple operations with the same connection
-for operation in operations {
-    try await performOperation(connection, operation)
-}
-
-// Return connection only once
-await manager.connectionCache.returnConnection(
-    "server-key",
-    poolConfig: .init(maxConnections: 10)
-)
-```
-
-### Timeout Configuration
-
-```swift
-// Short timeout for fast operations
-let fastConfig = ConnectionPoolConfiguration(
-    maxConnections: 10,
-    acquireTimeout: .seconds(1) // Quick timeout for fast operations
-)
-
-// Longer timeout for slow operations
-let slowConfig = ConnectionPoolConfiguration(
-    maxConnections: 10,
-    acquireTimeout: .seconds(30) // Longer timeout for slow operations
-)
-```
-
-## Integration with Other Features
-
-### Connection Pooling with Parallel Connections
-
-```swift
-let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
-
-// Establish connections in parallel
-try await manager.connectParallel(
-    to: servers,
-    maxConcurrentConnections: 5
-)
-
-// Use pooled connections for operations
-let poolConfig = ConnectionPoolConfiguration(maxConnections: 10)
-
-for server in servers {
-    let connection = try await manager.connectionCache.acquireConnection(
-        for: server.cacheKey,
-        poolConfig: poolConfig
-    ) {
-        return try await createConnection(for: server)
-    }
-    
-    // Use connection
-    await manager.connectionCache.returnConnection(
-        server.cacheKey,
-        poolConfig: poolConfig
-    )
-}
-```
-
-### Pooling with Network Event Monitoring
-
-```swift
-// Pool connections and monitor network events
-let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
-
-// Set up network event monitoring
-manager.delegate = MyConnectionDelegate()
-
-// Use pooled connections
-let connection = try await manager.connectionCache.acquireConnection(
-    for: "server-key",
-    poolConfig: .init(maxConnections: 10)
-) {
-    return try await createConnection()
-}
-
-// Network events will be handled automatically
-```
-
-## Error Handling
-
-### Acquisition Timeout
-
-```swift
-let connection = try await manager.connectionCache.acquireConnection(
-    for: "server-key",
-    poolConfig: .init(
-        maxConnections: 1,
-        acquireTimeout: .milliseconds(100)
-    )
-) {
-    // Simulate slow connection creation
-    try await Task.sleep(for: .seconds(1))
-    throw NSError(domain: "test", code: 1, userInfo: nil)
-}
-
-// Should return nil due to timeout
-if connection == nil {
-    logger.error("Connection acquisition timed out")
-}
-```
-
-### Connection Factory Errors
-
-```swift
-let connection = try await manager.connectionCache.acquireConnection(
-    for: "server-key",
-    poolConfig: .init(maxConnections: 10)
-) {
-    do {
-        return try await createConnection()
-    } catch ConnectionError.serverUnavailable {
-        // Handle specific errors
-        logger.error("Server unavailable")
-        throw error
-    } catch {
-        // Handle other errors
-        logger.error("Connection creation failed: \(error)")
-        throw error
-    }
-}
-```
-
-## Performance Considerations
-
-### Pool Size Optimization
-
-```swift
-// Calculate optimal pool size based on workload
-let optimalPoolSize = min(
-    max(5, concurrentRequests / 2), // At least 5, half of concurrent requests
-    50                              // Maximum 50 connections
-)
-
-let poolConfig = ConnectionPoolConfiguration(
-    maxConnections: optimalPoolSize,
-    acquireTimeout: .seconds(5)
-)
-```
-
-### Memory Management
-
-```swift
-// Monitor pool memory usage
-let allConnections = await manager.connectionCache.fetchAllConnections()
-let memoryUsage = estimateMemoryUsage(allConnections)
-
-if memoryUsage > maxMemoryThreshold {
-    // Reduce pool size or clean up idle connections
-    logger.warning("Pool memory usage high: \(memoryUsage)")
-}
-```
-
-## Testing Connection Pooling
-
-### Unit Testing
-
-```swift
-func testConnectionPooling() async throws {
-    let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
-    
-    // Test pool configuration
-    let poolConfig = ConnectionPoolConfiguration(
-        maxConnections: 5,
-        acquireTimeout: .seconds(5)
-    )
-    
-    XCTAssertEqual(poolConfig.maxConnections, 5)
-    XCTAssertEqual(poolConfig.acquireTimeout, .seconds(5))
-}
-```
-
-### Integration Testing
-
-```swift
-func testConnectionPoolAcquireReturn() async throws {
-    let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
-    
-    // Test acquire and return operations
-    let connection = try await manager.connectionCache.acquireConnection(
-        for: "test-key",
-        poolConfig: .init(maxConnections: 10)
-    ) {
-        return createMockConnection()
-    }
-    
-    XCTAssertNotNil(connection)
-    
-    // Test return operation
-    await manager.connectionCache.returnConnection(
-        "test-key",
-        poolConfig: .init(maxConnections: 10)
-    )
-}
-```
+> Note: `ConnectionPoolConfiguration` remains temporarily available for source compatibility,
+> but it is deprecated and is not used by `ConnectionManager`.
 
 ## See Also
 
-- <doc:RetryStrategies>
+- <doc:BasicUsage>
 - <doc:ParallelConnections>
-- <doc:NetworkEvents> 
+- <doc:RetryStrategies>

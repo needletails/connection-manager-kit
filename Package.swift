@@ -18,12 +18,12 @@ let package = Package(
             targets: ["ConnectionManagerKit"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.11.0"),
-        .package(url: "https://github.com/apple/swift-nio.git", from: "2.101.3"),
-        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.37.2"),
+        .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.12.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.102.0"),
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.37.4"),
         .package(url: "https://github.com/apple/swift-nio-transport-services.git", from: "1.28.0"),
         .package(url: "https://github.com/apple/swift-nio-extras.git", .upToNextMinor(from: "1.26.0")),
-        .package(url: "https://github.com/needletails/needletail-logger.git", from: "3.2.0"),
+        .package(url: "https://github.com/needletails/needletail-logger.git", from: "3.2.1"),
         .package(url: "https://github.com/apple/swift-metrics.git", from: "2.11.0"),
         .package(url: "https://github.com/needletails/swift-crypto.git", from: "1.1.4")
     ],
