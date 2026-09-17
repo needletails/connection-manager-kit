@@ -47,8 +47,8 @@ This project and everyone participating in it is governed by our Code of Conduct
 
 ### Prerequisites
 
-- Swift 6.0+
-- Xcode 15.0+ (for Apple platforms)
+- Swift 6.3+ (CI validates with Swift 6.4 and treats warnings as errors)
+- An Xcode or standalone toolchain that supports Swift 6.3 or later
 - Linux development environment (for Linux support)
 
 ### Getting Started
@@ -95,7 +95,7 @@ connection-manager-kit/
 ### Swift Style Guide
 
 - Follow the [Swift API Design Guidelines](https://www.swift.org/documentation/api-design-guidelines/)
-- Use Swift 6.0+ features where appropriate
+- Use modern Swift concurrency features, but stay within the Swift 6.3 language baseline declared in `Package.swift`
 - Prefer async/await over completion handlers
 - Use meaningful variable and function names
 - Add comprehensive documentation comments

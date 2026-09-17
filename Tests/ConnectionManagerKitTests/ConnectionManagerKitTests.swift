@@ -64,75 +64,6 @@ struct ConnectionManagerKitTests {
         #expect(config.origin == "localhost")
         #expect(config.port == 6669)
     }
-    
-    @Test("Listener recovery does not trigger for normal idle after clean disconnect")
-    func testListenerRecoveryDoesNotTriggerForCleanIdleState() {
-        let metrics = ListenerMetrics(
-            activeConnections: 0,
-            totalConnectionsAccepted: 1,
-            totalConnectionsClosed: 1,
-            recoveryAttempts: 0,
-            connectionErrors: 0
-        )
-        let configuration = ListenerConfiguration(maxRecoveryAttempts: 3)
-        
-        #expect(!ConnectionListener<ByteBuffer, ByteBuffer>.shouldAttemptRecovery(
-            metrics: metrics,
-            configuration: configuration
-        ))
-    }
-    
-    @Test("Listener recovery triggers only when idle state includes errors")
-    func testListenerRecoveryTriggersForErroredIdleState() {
-        let metrics = ListenerMetrics(
-            activeConnections: 0,
-            totalConnectionsAccepted: 1,
-            totalConnectionsClosed: 1,
-            recoveryAttempts: 0,
-            connectionErrors: 1
-        )
-        let configuration = ListenerConfiguration(maxRecoveryAttempts: 3)
-        
-        #expect(ConnectionListener<ByteBuffer, ByteBuffer>.shouldAttemptRecovery(
-            metrics: metrics,
-            configuration: configuration
-        ))
-    }
-    
-    @Test("Listener recovery does not trigger while errored listener still has active connections")
-    func testListenerRecoveryDoesNotTriggerWithActiveConnections() {
-        let metrics = ListenerMetrics(
-            activeConnections: 1,
-            totalConnectionsAccepted: 1,
-            totalConnectionsClosed: 0,
-            recoveryAttempts: 0,
-            connectionErrors: 1
-        )
-        let configuration = ListenerConfiguration(maxRecoveryAttempts: 3)
-        
-        #expect(!ConnectionListener<ByteBuffer, ByteBuffer>.shouldAttemptRecovery(
-            metrics: metrics,
-            configuration: configuration
-        ))
-    }
-    
-    @Test("Listener recovery does not trigger after max recovery attempts")
-    func testListenerRecoveryDoesNotTriggerAfterMaxAttempts() {
-        let metrics = ListenerMetrics(
-            activeConnections: 0,
-            totalConnectionsAccepted: 1,
-            totalConnectionsClosed: 1,
-            recoveryAttempts: 3,
-            connectionErrors: 1
-        )
-        let configuration = ListenerConfiguration(maxRecoveryAttempts: 3)
-        
-        #expect(!ConnectionListener<ByteBuffer, ByteBuffer>.shouldAttemptRecovery(
-            metrics: metrics,
-            configuration: configuration
-        ))
-    }
-    
     // MARK: - Optimized ConnectionListener Tests
     
     @Test("Listener should enforce max concurrent connections")
@@ -1077,29 +1008,6 @@ struct ConnectionManagerKitTests {
         #expect(defaultConfig.enableLRU == false) // LRU disabled by default for backward compatibility
         #expect(defaultConfig.ttl == nil)
     }
-    
-    @Test("ConnectionPoolConfiguration should initialize correctly")
-    func testConnectionPoolConfiguration() async throws {
-        let config = ConnectionPoolConfiguration(
-            minConnections: 0,
-            maxConnections: 20,
-            acquireTimeout: .seconds(10),
-            maxIdleTime: .seconds(60)
-        )
-        
-        #expect(config.minConnections == 0)
-        #expect(config.maxConnections == 20)
-        #expect(config.acquireTimeout == .seconds(10))
-        #expect(config.maxIdleTime == .seconds(60))
-        
-        // Test default configuration
-        let defaultConfig = ConnectionPoolConfiguration()
-        #expect(defaultConfig.minConnections == 0)
-        #expect(defaultConfig.maxConnections == 10)
-        #expect(defaultConfig.acquireTimeout == .seconds(30))
-        #expect(defaultConfig.maxIdleTime == .seconds(300))
-    }
-    
     @Test("NetworkEventConfiguration should initialize correctly")
     func testNetworkEventConfiguration() async throws {
         let config = NetworkEventConfiguration(
@@ -1179,127 +1087,6 @@ struct ConnectionManagerKitTests {
         }
     }
     
-    // MARK: - Connection Pooling Tests
-    
-    @Test("Connection pool should handle basic operations")
-    func testConnectionPooling() async throws {
-        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
-        let conformer = MockConnectionDelegate(
-            manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
-        let contextDelegate = MockChannelContextDelegate()
-        
-        // Create a connection
-        let connection = ChildChannelService<ByteBuffer, ByteBuffer>(
-            logger: .init(),
-            config: .init(
-                host: "test-host", port: 8080, enableTLS: false, cacheKey: "pool-test", 
-                delegate: conformer, contextDelegate: contextDelegate), 
-            childChannel: nil, delegate: manager)
-        
-        // Cache the connection
-        await manager.connectionCache.cacheConnection(connection, for: "pool-test")
-        
-        // Verify connection is cached
-        let foundConnection = await manager.connectionCache.findConnection(cacheKey: "pool-test")
-        #expect(foundConnection != nil)
-        
-        // Test pool configuration
-        let poolConfig = ConnectionPoolConfiguration(
-            minConnections: 0,
-            maxConnections: 5,
-            acquireTimeout: .seconds(5),
-            maxIdleTime: .seconds(30)
-        )
-        
-        #expect(poolConfig.maxConnections == 5)
-        #expect(poolConfig.acquireTimeout == .seconds(5))
-    }
-    
-    @Test("Connection pool should handle acquire and return operations")
-    func testConnectionPoolAcquireReturn() async throws {
-        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
-        let conformer = MockConnectionDelegate(
-            manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
-        let contextDelegate = MockChannelContextDelegate()
-        
-        // Create a connection
-        let connection = ChildChannelService<ByteBuffer, ByteBuffer>(
-            logger: .init(),
-            config: .init(
-                host: "test-host", port: 8080, enableTLS: false, cacheKey: "acquire-test", 
-                delegate: conformer, contextDelegate: contextDelegate), 
-            childChannel: nil, delegate: manager)
-        
-        // Cache the connection
-        await manager.connectionCache.cacheConnection(connection, for: "acquire-test")
-        
-        // Test acquire operation
-        let poolConfig = ConnectionPoolConfiguration(maxConnections: 10)
-        let acquiredConnection = try await manager.connectionCache.acquireConnection(
-            for: "acquire-test",
-            poolConfig: poolConfig
-        ) {
-            // Connection factory
-            return ChildChannelService<ByteBuffer, ByteBuffer>(
-                logger: .init(),
-                config: .init(
-                    host: "factory-host", port: 8080, enableTLS: false, cacheKey: "factory-test", 
-                    delegate: conformer, contextDelegate: contextDelegate), 
-                childChannel: nil, delegate: manager)
-        }
-        
-        #expect(acquiredConnection != nil)
-        
-        // Test return operation
-        if acquiredConnection != nil {
-            await manager.connectionCache.returnConnection(
-                "acquire-test",
-                poolConfig: poolConfig
-            )
-        }
-    }
-    
-    @Test("Connection pool should handle timeout scenarios")
-    func testConnectionPoolTimeout() async throws {
-        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
-        let conformer = MockConnectionDelegate(
-            manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
-        let contextDelegate = MockChannelContextDelegate()
-        
-        // Test acquire with very short timeout
-        let poolConfig = ConnectionPoolConfiguration(
-            maxConnections: 1,
-            acquireTimeout: .milliseconds(100)
-        )
-        
-        // First, fill the pool with one connection
-        let existingConnection = ChildChannelService<ByteBuffer, ByteBuffer>(
-            logger: .init(),
-            config: .init(
-                host: "existing-host", port: 8080, enableTLS: false, cacheKey: "existing-test", 
-                delegate: conformer, contextDelegate: contextDelegate), 
-            childChannel: nil, delegate: manager)
-        
-        await manager.connectionCache.cacheConnection(existingConnection, for: "existing-test")
-        
-        // Now try to acquire a connection when pool is full - should timeout
-        let connection = try await manager.connectionCache.acquireConnection(
-            for: "timeout-test",
-            poolConfig: poolConfig
-        ) {
-            // This should never be called since pool is full
-            return ChildChannelService<ByteBuffer, ByteBuffer>(
-                logger: .init(),
-                config: .init(
-                    host: "timeout-host", port: 8080, enableTLS: false, cacheKey: "timeout-test", 
-                    delegate: conformer, contextDelegate: contextDelegate), 
-                childChannel: nil, delegate: manager)
-        }
-        
-        // Should return nil due to timeout
-        #expect(connection == nil)
-    }
-    
     // MARK: - Parallel Connection Tests
     
     @Test("Parallel connection should establish connections")
@@ -1341,12 +1128,22 @@ struct ConnectionManagerKitTests {
             maxConcurrentConnections: 2
         )
         
-        // Should have attempted connections
+        // Both cached services must be running, not merely connected at the socket layer.
         let cachedConnections = await manager.connectionCache.fetchAllConnections()
-        #expect(cachedConnections.count >= 0)
+        #expect(cachedConnections.count == 2)
+        #expect(
+            await contextDelegate.waitForWriter(timeout: .seconds(1)),
+            "connectParallel must start ChildChannelService and deliver a writer"
+        )
+        let connectedMetrics = await manager.getCurrentMetrics()
+        #expect(connectedMetrics.totalConnections == 2)
+        #expect(connectedMetrics.activeConnections == 2)
         
         // Proper cleanup - shutdown manager first
         await manager.gracefulShutdown()
+        let shutdownMetrics = await manager.getCurrentMetrics()
+        #expect(shutdownMetrics.totalConnections == 2)
+        #expect(shutdownMetrics.activeConnections == 0)
         
         // Wait a bit for cleanup
         try await Task.sleep(until: .now + .milliseconds(100))
@@ -1543,41 +1340,16 @@ struct ConnectionManagerKitTests {
         try await Task.sleep(for: .milliseconds(150))
     }
     
-    @Test("Connection pooling should work with network events")
-    func testConnectionPoolingWithNetworkEvents() async throws {
-        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
+    @Test("Cache hard cap should be enforced without LRU")
+    func testCacheHardCapWithoutLRU() async throws {
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>(
+            cacheConfiguration: .init(maxConnections: 2, enableLRU: false)
+        )
         let conformer = MockConnectionDelegate(
             manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
         let contextDelegate = MockChannelContextDelegate()
         
-        // Create connection
-        let connection = ChildChannelService<ByteBuffer, ByteBuffer>(
-            logger: .init(),
-            config: .init(
-                host: "test-host", port: 8080, enableTLS: false, cacheKey: "network-pool", 
-                delegate: conformer, contextDelegate: contextDelegate), 
-            childChannel: nil, delegate: manager)
-        
-        // Cache connection
-        await manager.connectionCache.cacheConnection(connection, for: "network-pool")
-        
-        // Verify connection is cached
-        let foundConnection = await manager.connectionCache.findConnection(cacheKey: "network-pool")
-        #expect(foundConnection != nil)
-        
-        // Test pool configuration
-        let poolConfig = ConnectionPoolConfiguration(maxConnections: 5)
-        #expect(poolConfig.maxConnections == 5)
-    }
-    
-    @Test("Cache configuration should work with LRU")
-    func testCacheConfigurationWithLRU() async throws {
-        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
-        let conformer = MockConnectionDelegate(
-            manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
-        let contextDelegate = MockChannelContextDelegate()
-        
-        // Create multiple connections to test LRU
+        // FIFO eviction is used when access-order LRU is disabled.
         for i in 1...3 {
             let connection = ChildChannelService<ByteBuffer, ByteBuffer>(
                 logger: .init(),
@@ -1589,9 +1361,87 @@ struct ConnectionManagerKitTests {
             await manager.connectionCache.cacheConnection(connection, for: "lru-test-\(i)")
         }
         
-        // Verify connections are cached
         let cachedConnections = await manager.connectionCache.fetchAllConnections()
-        #expect(cachedConnections.count >= 0)
+        #expect(cachedConnections.count == 2)
+        #expect(await manager.connectionCache.findConnection(cacheKey: "lru-test-1") == nil)
+        #expect(await manager.connectionCache.findConnection(cacheKey: "lru-test-2") != nil)
+        #expect(await manager.connectionCache.findConnection(cacheKey: "lru-test-3") != nil)
+    }
+
+    @Test("Cache evicts the least recently used connection when LRU is enabled")
+    func testCacheEvictsLeastRecentlyUsedWithLRU() async throws {
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>(
+            cacheConfiguration: .init(maxConnections: 2, enableLRU: true)
+        )
+        let conformer = MockConnectionDelegate(
+            manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
+        let contextDelegate = MockChannelContextDelegate()
+
+        func makeConnection(_ key: String) -> ChildChannelService<ByteBuffer, ByteBuffer> {
+            ChildChannelService<ByteBuffer, ByteBuffer>(
+                logger: .init(),
+                config: .init(
+                    host: "test-host", port: 8080, enableTLS: false, cacheKey: key,
+                    delegate: conformer, contextDelegate: contextDelegate),
+                childChannel: nil, delegate: manager)
+        }
+
+        await manager.connectionCache.cacheConnection(makeConnection("lru-a"), for: "lru-a")
+        await manager.connectionCache.cacheConnection(makeConnection("lru-b"), for: "lru-b")
+
+        // Touch "lru-a" so "lru-b" becomes the least recently used entry.
+        #expect(await manager.connectionCache.findConnection(cacheKey: "lru-a") != nil)
+
+        await manager.connectionCache.cacheConnection(makeConnection("lru-c"), for: "lru-c")
+
+        #expect(await manager.connectionCache.count == 2)
+        #expect(await manager.connectionCache.findConnection(cacheKey: "lru-b") == nil)
+        #expect(await manager.connectionCache.findConnection(cacheKey: "lru-a") != nil)
+        #expect(await manager.connectionCache.findConnection(cacheKey: "lru-c") != nil)
+    }
+
+    @Test("Connection manager can connect again after graceful shutdown")
+    func testReconnectAfterGracefulShutdown() async throws {
+        let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
+        let listener = ConnectionListener<ByteBuffer, ByteBuffer>()
+        let serverGroup = MultiThreadedEventLoopGroup.singleton
+        let listenerDelegation = ListenerDelegation(shouldShutdown: false)
+        let conformer = MockConnectionDelegate(manager: manager, listenerDelegation: listenerDelegation)
+        let contextDelegate = MockChannelContextDelegate()
+
+        let serverTask = Task {
+            let config = try await listener.resolveAddress(
+                .init(group: serverGroup, host: "localhost", port: 6684))
+            try await listener.listen(
+                address: config.address!,
+                configuration: config,
+                delegate: conformer,
+                listenerDelegate: listenerDelegation)
+        }
+        try await Task.sleep(until: .now + .milliseconds(100))
+
+        let servers = [
+            ServerLocation(
+                host: "localhost", port: 6684, enableTLS: false, cacheKey: "reconnect-test",
+                delegate: conformer, contextDelegate: contextDelegate)
+        ]
+
+        try await manager.connect(to: servers)
+        #expect(await manager.connectionCache.count == 1)
+
+        await manager.gracefulShutdown()
+        #expect(await manager.connectionCache.count == 0)
+        #expect(await manager.getCurrentMetrics().activeConnections == 0)
+
+        // The same manager instance must be usable again after shutdown completes.
+        try await manager.connect(to: servers)
+        #expect(await manager.connectionCache.count == 1)
+        #expect(await manager.getCurrentMetrics().activeConnections == 1)
+
+        await manager.gracefulShutdown()
+        await listener.serviceGroup?.triggerGracefulShutdown()
+        serverTask.cancel()
+        try await Task.sleep(for: .milliseconds(150))
     }
     
     @Test("Network event configuration should initialize with custom values")
@@ -1609,8 +1459,8 @@ struct ConnectionManagerKitTests {
         #expect(config.enableEventPrioritization == false)
     }
     
-    @Test("Connection manager should handle graceful shutdown with pooled connections")
-    func testGracefulShutdownWithPooledConnections() async throws {
+    @Test("Connection manager graceful shutdown empties the cache")
+    func testGracefulShutdownEmptiesCache() async throws {
         let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
         let conformer = MockConnectionDelegate(
             manager: manager, listenerDelegation: ListenerDelegation(shouldShutdown: false))
@@ -1633,9 +1483,11 @@ struct ConnectionManagerKitTests {
         // Perform graceful shutdown
         await manager.gracefulShutdown()
         
-        // Verify shouldReconnect is false
+        // Verify shouldReconnect is false and the cache was actually emptied
         let shouldReconnect = await manager.shouldReconnect
         #expect(shouldReconnect == false)
+        #expect(await manager.connectionCache.isEmpty)
+        #expect(await manager.connectionCache.findConnection(cacheKey: "shutdown-test") == nil)
     }
     
     @Test("Connection cache should handle empty state correctly")

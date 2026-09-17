@@ -381,7 +381,7 @@ func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>
 3. **Performance Issues**
    - Enable session resumption
    - Use appropriate cipher suites
-   - Monitor connection pooling
+   - Monitor cached connection health
 
 ### Debug TLS Connections
 

@@ -20,13 +20,13 @@ jobs:
           sudo apt-get update
           sudo apt-get -y install libcurl4-openssl-dev
 
-      - name: Install Swift 6.3.0 with Swiftly
+      - name: Install Swift 6.4.0 with Swiftly
         run: |
           curl -O https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz
           tar zxf swiftly-$(uname -m).tar.gz
-          ./swiftly init --quiet-shell-followup
+          ./swiftly init --skip-install --assume-yes --quiet-shell-followup
           source ~/.local/share/swiftly/env.sh
-          swiftly install --use 6.3.0
+          swiftly install --assume-yes --use 6.4.0
           echo "Looking for Swift in toolchains directory..."
           ls -la $HOME/.local/share/swiftly/toolchains/
           SWIFT_PATH=$(find $HOME/.local/share/swiftly/toolchains -type f \( -path '*/usr/bin/swift' -o -path '*/bin/swift' \) 2>/dev/null | head -1)
@@ -40,15 +40,24 @@ jobs:
           echo "$SWIFT_PATH" >> $GITHUB_PATH
 
       - name: Cache Swift packages
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: .build
-          key: ${{ runner.os }}-swift-${{ hashFiles('Package.swift') }}
+          key: ${{ runner.os }}-swift-6.4-${{ hashFiles('Package.swift', 'Package.resolved') }}
           restore-keys: |
-            ${{ runner.os }}-swift-
+            ${{ runner.os }}-swift-6.4-
 
       - name: Build
-        run: swift build --configuration release
+        run: swift build --configuration release -Xswiftc -warnings-as-errors
 
       - name: Test
-        run: swift test --configuration release
+        run: swift test --configuration release -Xswiftc -warnings-as-errors
+
+      - name: Generate SBOM
+        run: swift package generate-sbom --product ConnectionManagerKit --sbom-spec spdx --sbom-filter all --sbom-output-dir .build/sboms
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: connection-manager-kit-sbom
+          path: .build/sboms

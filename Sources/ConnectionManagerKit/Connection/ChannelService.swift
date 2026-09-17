@@ -159,7 +159,17 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
     /// }
     /// ```
     public func run() async throws {
-        try await exectuteTask()
+        do {
+            try await exectuteTask()
+        } catch {
+            // Cancellation is an orderly shutdown, not a channel fault.
+            if !(error is CancellationError) {
+                await contextDelegate?.reportChildChannel(error: error, id: config.cacheKey)
+            }
+            await contextDelegate?.didShutdownChildChannel()
+            throw error
+        }
+        await contextDelegate?.didShutdownChildChannel()
     }
     
     /// Executes the main task for the child channel service.
@@ -199,14 +209,11 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
                 for await stream in _inbound {
                     //We need to make sure that the sequence is canceled when we finish the stream
                     for try await inbound in stream.cancelOnGracefulShutdown() {
-                        group.addTask { [weak self] in
-                            guard let self else { return }
-                            let streamContext = StreamContext<Inbound, Outbound>(
-                                id: channelId,
-                                channel: childChannel,
-                                inbound: inbound)
-                            await contextDelegate?.deliverInboundBuffer(context: streamContext)
-                        }
+                        let streamContext = StreamContext<Inbound, Outbound>(
+                            id: channelId,
+                            channel: childChannel,
+                            inbound: inbound)
+                        await contextDelegate?.deliverInboundBuffer(context: streamContext)
                     }
                 }
                 
@@ -275,19 +282,10 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
     /// }
     /// ```
     func shutdown() async throws {
-        // Finish continuations if they exist
-        if let inboundContinuation {
-            inboundContinuation.finish()
-        }
-        if let continuation {
-            continuation.finish()
-        }
-        
-        // Only try to finish the outbound writer if we have a valid channel
-        if let childChannel {
-            try await childChannel.executeThenClose { inbound, outbound in
-                outbound.finish()
-            }
+        inboundContinuation?.finish()
+        continuation?.finish()
+        if let channel = childChannel?.channel, channel.isActive {
+            try await channel.close()
         }
     }
 }

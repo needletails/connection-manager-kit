@@ -161,11 +161,13 @@ actor WebSocketTests {
             contextDelegate: clientDelegate
         )
         
-        Task {
+        let connectTask = Task {
             try await manager.connectWebSocket(to: [server])
         }
         
         try await Task.sleep(for: .seconds(2))
+        // Surface connection failures instead of silently discarding them.
+        try await connectTask.value
         
         // Send ping and expect pong
         let pingFrame = WebSocketFrame(fin: true, opcode: .ping, data: ByteBuffer(data: pingPayload))
@@ -250,11 +252,13 @@ actor WebSocketTests {
             contextDelegate: clientDelegate
         )
         
-        Task {
+        let connectTask = Task {
             try await manager.connectWebSocket(to: [server])
         }
         
         try await Task.sleep(for: .seconds(2))
+        // Surface connection failures instead of silently discarding them.
+        try await connectTask.value
         
         // Send text frame
         let textFrame = WebSocketFrame(fin: true, opcode: .text, data: ByteBuffer(string: testMessage))
@@ -338,11 +342,13 @@ actor WebSocketTests {
             contextDelegate: clientDelegate
         )
         
-        Task {
+        let connectTask = Task {
             try await manager.connectWebSocket(to: [server])
         }
         
         try await Task.sleep(for: .seconds(2))
+        // Surface connection failures instead of silently discarding them.
+        try await connectTask.value
         
         // Send binary frame
         let binaryFrame = WebSocketFrame(fin: true, opcode: .binary, data: ByteBuffer(data: testData))
@@ -427,11 +433,13 @@ actor WebSocketTests {
             contextDelegate: clientDelegate
         )
         
-        Task {
+        let connectTask = Task {
             try await manager.connectWebSocket(to: [server])
         }
         
         try await Task.sleep(for: .seconds(2))
+        // Surface connection failures instead of silently discarding them.
+        try await connectTask.value
         
         // Send close frame
         var closeData = ByteBuffer()
@@ -913,6 +921,42 @@ actor WebSocketTests {
         try await Task.sleep(for: .milliseconds(500))
         serverTask.cancel()
         try await Task.sleep(for: .milliseconds(500))
+    }
+
+    @Test("Socket receiver streams are ready and reusable")
+    @MainActor
+    func testSocketReceiverStreamLifecycle() async {
+        let receiver = SocketReceiver()
+        guard let firstStream = receiver.messageStream else {
+            Issue.record("The message stream was not ready after init")
+            return
+        }
+        #expect(receiver.eventStream != nil)
+
+        receiver.setInboundMessage(.text("first"))
+        var firstMessages = firstStream.makeAsyncIterator()
+        guard case .text("first")? = await firstMessages.next() else {
+            Issue.record("The first message was not delivered")
+            return
+        }
+
+        receiver.finishStreams()
+        #expect(receiver.messageStream == nil)
+        #expect(receiver.eventStream == nil)
+
+        receiver.prepareForConnection()
+        guard let reconnectedStream = receiver.messageStream else {
+            Issue.record("The message stream was not recreated")
+            return
+        }
+        #expect(receiver.eventStream != nil)
+
+        receiver.setInboundMessage(.text("second"))
+        var reconnectedMessages = reconnectedStream.makeAsyncIterator()
+        guard case .text("second")? = await reconnectedMessages.next() else {
+            Issue.record("The post-shutdown message was not delivered")
+            return
+        }
     }
 }
 

@@ -2,7 +2,7 @@
 
 # ConnectionManagerKit
 
-[![Swift](https://img.shields.io/badge/Swift-6.0-orange.svg)](https://swift.org)
+[![Swift](https://img.shields.io/badge/Swift-6.3%2B-orange.svg)](https://swift.org)
 [![Platform](https://img.shields.io/static/v1?label=Platform&message=iOS%2017%2B%20%7C%20macOS%2014%2B%20%7C%20Linux%20%7C%20Android&color=blue&logo=android&logoColor=white
 )](https://developer.apple.com)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -15,15 +15,14 @@ A modern, cross-platform networking framework built on SwiftNIO for managing net
 - **Apple Platforms** - iOS 17.0+, macOS 14.0+, tvOS 17.0+, watchOS 10.0+
 - **Android Support** - Android compatibility with SwiftNIO (see Android section)
 - **Linux Support** - Linux compatibility with SwiftNIO
-- **Swift 6.0+** - Latest Swift language features
+- **Swift 6.3+** - Strict-concurrency-ready Swift package, validated on Swift 6.4
 - **Async/Await** - Modern concurrency throughout
 
 ### 🔄 Automatic Connection Management
 - **Smart Reconnection** - Built-in retry logic with exponential backoff
 - **Advanced Retry Strategies** - Fixed delay, exponential backoff with jitter, and custom retry policies
 - **Parallel Connections** - Concurrent connection establishment for improved performance
-- **Connection Pooling** - Efficient connection reuse with acquire/return semantics
-- **Connection Caching** - LRU eviction, TTL support, and automatic cleanup
+- **Bounded Connection Caching** - Keyed reuse with FIFO/LRU eviction and TTL support
 - **Graceful Shutdown** - Proper resource cleanup and termination
 - **Network Monitoring** - Real-time network event tracking
 
@@ -47,15 +46,15 @@ Add ConnectionManagerKit to your project using Swift Package Manager:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/needletails/connection-manager-kit.git", from: "1.0.0")
+    .package(url: "https://github.com/needletails/connection-manager-kit.git", from: "2.5.0")
 ]
 ```
 
 ### Requirements
 
 - iOS 17.0+ / macOS 14.0+ / tvOS 17.0+ / watchOS 10.0+ / Linux
-- Swift 6.0+
-- Xcode 15.0+ (for Apple platforms)
+- Swift 6.3+ (CI builds and tests with Swift 6.4, warnings as errors)
+- An Xcode or standalone toolchain that supports Swift 6.3 or later
 
 ## 🚀 Quick Start
 
@@ -142,46 +141,7 @@ try await manager.connectParallel(
 )
 ```
 
-### 5. Use Connection Pooling
-
-```swift
-// Configure connection pool
-let poolConfig = ConnectionPoolConfiguration(
-    minConnections: 2,
-    maxConnections: 10,
-    acquireTimeout: .seconds(5),
-    maxIdleTime: .seconds(60)
-)
-
-// Acquire connection from pool
-let connection = try await manager.connectionCache.acquireConnection(
-    for: "api-server",
-    poolConfig: poolConfig
-) {
-    // Connection factory: create new connection if needed
-    return ChildChannelService<ByteBuffer, ByteBuffer>(
-        logger: .init(),
-        config: .init(
-            host: "api.example.com",
-            port: 443,
-            enableTLS: true,
-            cacheKey: "api-server",
-            delegate: connectionDelegate,
-            contextDelegate: contextDelegate
-        ),
-        childChannel: nil,
-        delegate: manager
-    )
-}
-
-// Return connection to pool
-await manager.connectionCache.returnConnection(
-    "api-server",
-    poolConfig: poolConfig
-)
-```
-
-### 6. Handle Data
+### 5. Handle Data
 
 ```swift
 class MyChannelContextDelegate: ChannelContextDelegate {
@@ -207,7 +167,7 @@ class MyChannelContextDelegate: ChannelContextDelegate {
 }
 ```
 
-### 7. Graceful Shutdown
+### 6. Graceful Shutdown
 
 ```swift
 await manager.gracefulShutdown()
@@ -340,22 +300,17 @@ swift package generate-documentation
 
 ## 🔧 Configuration
 
-### Connection Pooling and Caching
+### Connection Caching
 
 ```swift
-// Configure connection cache with LRU eviction and TTL
 let cacheConfig = CacheConfiguration(
     maxConnections: 50,
     ttl: .seconds(300),  // 5 minutes TTL
     enableLRU: true      // Enable LRU eviction
 )
 
-// Configure connection pool
-let poolConfig = ConnectionPoolConfiguration(
-    minConnections: 2,           // Maintain at least 2 connections
-    maxConnections: 20,          // Maximum 20 connections
-    acquireTimeout: .seconds(10), // 10 second timeout
-    maxIdleTime: .seconds(60)    // Close idle connections after 1 minute
+let manager = ConnectionManager<ByteBuffer, ByteBuffer>(
+    cacheConfiguration: cacheConfig
 )
 ```
 
@@ -515,14 +470,7 @@ class MyApp {
     let manager = ConnectionManager<ByteBuffer, ByteBuffer>()
     
     func shutdown() async {
-        // Trigger graceful shutdown
         await manager.gracefulShutdown()
-        
-        // Wait for shutdown to complete
-        while await manager.shouldReconnect {
-            try? await Task.sleep(until: .now + .milliseconds(100))
-        }
-        
         print("Shutdown complete")
     }
 }
@@ -544,7 +492,7 @@ The framework includes comprehensive unit tests covering:
 - Network event handling
 - Error scenarios
 - Graceful shutdown
-- Connection pooling
+- Bounded connection caching
 - Retry strategies
 - Parallel connections
 
@@ -565,7 +513,7 @@ ConnectionManagerKit is designed for production use with:
 - **High Performance** - Optimized for high-throughput applications
 - **Reliability** - Robust error handling and recovery
 - **Scalability** - Designed for large-scale deployments
-- **Connection Pooling** - Efficient resource management
+- **Bounded Connection Cache** - Predictable keyed connection reuse
 - **Advanced Retry Logic** - Configurable retry strategies for different scenarios
 
 ## 🔗 Related Projects
