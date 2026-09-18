@@ -1059,15 +1059,20 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     /// ```
     public func gracefulShutdown() async {
         isShuttingDown = true
+
+        let runs = Array(connectionRuns.values)
+        for run in runs {
+            run.task.cancel()
+        }
+
         do {
             try await connectionCache.removeAllConnection()
         } catch {
             logger.log(level: .error, message: "Error shutting down connections: \(error)")
         }
 
-        let runs = connectionRuns.values.map(\.task)
-        for task in runs {
-            await task.value
+        for run in runs {
+            await run.task.value
         }
         connectionRuns.removeAll()
         currentRunTokenByCacheKey.removeAll()
