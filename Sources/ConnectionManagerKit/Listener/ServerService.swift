@@ -358,7 +358,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
     func shutdownChildChannel(id: String) async {
         await self.stopTLS(from: id)
         if let context = channelContexts.first(where: { $0.id == id }) {
-            try? await context.channel.channel.close()
+            context.channel.channel.close(promise: nil)
         }
         self.inboundContinuations[id]?.finish()
         self.outboundContinuations[id]?.finish()
@@ -382,7 +382,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
         let contexts = channelContexts
         for context in contexts {
             await stopTLS(from: context.id)
-            try? await context.channel.channel.close()
+            context.channel.channel.close(promise: nil)
         }
 
         for continuation in inboundContinuations.values {
@@ -397,9 +397,9 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
         contextDelegates.removeAll()
         channelContexts.removeAll()
 
-        if let listeningChannel, listeningChannel.isActive {
-            try await listeningChannel.close()
-        }
+        // ServiceGroup / executeThenClose may already have closed the bind.
+        // Awaiting close() here throws `alreadyClosed` on POSIX NIO.
+        listeningChannel?.close(promise: nil)
         listeningChannel = nil
         
         logger.log(level: .info, message: "Server service shutdown complete")

@@ -76,9 +76,6 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
     /// The continuation for the outbound writer stream.
     var continuation: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation?
     
-    /// The continuation for the inbound stream.
-    var inboundContinuation: AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.Continuation?
-    
     /// Updates the configuration for this channel service.
     ///
     /// This method allows you to update the server location configuration and
@@ -178,69 +175,71 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
     /// inbound and outbound data, and coordinating with delegates.
     nonisolated private func exectuteTask() async throws {
         guard let childChannel else { return }
-        try await withThrowingDiscardingTaskGroup { group in
-            try await childChannel.executeThenClose { [weak self] inbound, outbound in
-                guard let self else { return }
-                
-                let channelId = await config.cacheKey
-                let channelContext = ChannelContext<Inbound, Outbound>(
-                    id: channelId,
-                    channel: childChannel
-                )
-                
-                await delegate.initializedChildChannel(channelContext)
-                
-                let (_inbound, _outbound) = await setUpStreams(
-                    inbound: inbound,
-                    outbound: outbound
-                )
-                
-                group.addTask { [weak self] in
+        // Close the socket from cancellation so POSIX NIO unblocks executeThenClose.
+        // Awaiting channel.close() from shutdown() while this iterator is live
+        // deadlocks the shared event loop on Linux.
+        try await withTaskCancellationHandler {
+            try await withThrowingDiscardingTaskGroup { group in
+                try await childChannel.executeThenClose { [weak self] inbound, outbound in
                     guard let self else { return }
-                    for await writer in _outbound {
-                        let writerContext = WriterContext(
-                            id: channelId,
-                            channel: childChannel,
-                            writer: writer)
-                        await contextDelegate?.deliverWriter(context: writerContext)
+                    
+                    let channelId = await config.cacheKey
+                    let channelContext = ChannelContext<Inbound, Outbound>(
+                        id: channelId,
+                        channel: childChannel
+                    )
+                    
+                    await delegate.initializedChildChannel(channelContext)
+                    
+                    let outboundStream = await setUpOutboundStream(outbound: outbound)
+                    
+                    group.addTask { [weak self] in
+                        guard let self else { return }
+                        for await writer in outboundStream {
+                            let writerContext = WriterContext(
+                                id: channelId,
+                                channel: childChannel,
+                                writer: writer)
+                            await contextDelegate?.deliverWriter(context: writerContext)
+                        }
                     }
-                }
-                
-                for await stream in _inbound {
-                    //We need to make sure that the sequence is canceled when we finish the stream
-                    for try await inbound in stream.cancelOnGracefulShutdown() {
+                    
+                    for try await message in inbound {
                         let streamContext = StreamContext<Inbound, Outbound>(
                             id: channelId,
                             channel: childChannel,
-                            inbound: inbound)
+                            inbound: message)
                         await contextDelegate?.deliverInboundBuffer(context: streamContext)
                     }
+                    
+                    outbound.finish()
+                    // Inbound ended (peer closed or we closed). Finish the writer stream so the
+                    // delivery child task exits; otherwise the task group waits forever and
+                    // run() never returns on a remote close.
+                    await finishOutboundStream()
                 }
-                
-                // Ensure the outbound writer is finished to prevent memory leaks
-                outbound.finish()
             }
+        } onCancel: {
+            childChannel.channel.close(promise: nil)
         }
     }
     
-    /// Sets up the inbound and outbound streams for data processing.
+    private func finishOutboundStream() {
+        continuation?.finish()
+        continuation = nil
+    }
+    
+    /// Yields the outbound writer to the context delegate without wrapping inbound.
     ///
-    /// This method creates async streams for both inbound and outbound data,
-    /// allowing the service to process data asynchronously and coordinate with
-    /// the context delegate.
-    ///
-    /// - Parameters:
-    ///   - inbound: The inbound stream from the channel.
-    ///   - outbound: The outbound writer for the channel.
-    /// - Returns: A tuple containing the configured inbound and outbound streams.
-    private func setUpStreams(
-        inbound: NIOAsyncChannelInboundStream<Inbound>,
+    /// Inbound is iterated directly from `executeThenClose` so a channel close or
+    /// task cancellation can finish the run loop. An extra inbound `AsyncStream`
+    /// cannot be cancelled from `shutdown()` and left POSIX NIO waiting forever.
+    private func setUpOutboundStream(
         outbound: NIOAsyncChannelOutboundWriter<Outbound>
-    ) -> (AsyncStream<NIOAsyncChannelInboundStream<Inbound>>, AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>) {
-        // Set up async streams without capturing the actor in producer closures
-        let (_outbound, outboundCont) = AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.makeStream()
-        self.continuation = outboundCont
-        outboundCont.onTermination = { [weak self] status in
+    ) -> AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>> {
+        let (stream, continuation) = AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.makeStream()
+        self.continuation = continuation
+        continuation.onTermination = { [weak self] status in
 #if DEBUG
             Task { [weak self] in
                 guard let self else { return }
@@ -248,21 +247,8 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
             }
 #endif
         }
-        outboundCont.yield(outbound)
-
-        let (_inbound, inboundCont) = AsyncStream<NIOAsyncChannelInboundStream<Inbound>>.makeStream()
-        self.inboundContinuation = inboundCont
-        inboundCont.onTermination = { [weak self] status in
-#if DEBUG
-            Task { [weak self] in
-                guard let self else { return }
-                self.logger.log(level: .trace, message: "Inbound Stream Terminated with status: \(status)")
-            }
-#endif
-        }
-        inboundCont.yield(inbound)
-
-        return (_inbound, _outbound)
+        continuation.yield(outbound)
+        return stream
     }
     
     /// Shuts down the child channel service.
@@ -282,10 +268,9 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
     /// }
     /// ```
     func shutdown() async throws {
-        inboundContinuation?.finish()
-        continuation?.finish()
-        if let channel = childChannel?.channel, channel.isActive {
-            try await channel.close()
-        }
+        finishOutboundStream()
+        // Fire-and-forget: executeThenClose owns the close. Waiting here races
+        // the inbound iterator on the same event loop and hangs on Linux.
+        childChannel?.channel.close(promise: nil)
     }
 }

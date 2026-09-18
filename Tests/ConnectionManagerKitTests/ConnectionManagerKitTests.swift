@@ -94,7 +94,12 @@ struct ConnectionManagerKitTests {
                 let bootstrap = ClientBootstrap(group: clientGroup)
                     .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
                     .channelInitializer { channel in
-                        channel.pipeline.addHandler(ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216))
+                        channel.eventLoop.makeCompletedFuture {
+                            try channel.pipeline.syncOperations.addHandler(
+                                ByteToMessageHandler(
+                                    LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes),
+                                    maximumBufferSize: 16_777_216))
+                        }
                     }
                 
                 return try await bootstrap.connect(host: "localhost", port: 6680).get()
@@ -113,7 +118,12 @@ struct ConnectionManagerKitTests {
             let bootstrap = ClientBootstrap(group: clientGroup)
                 .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
                 .channelInitializer { channel in
-                    channel.pipeline.addHandler(ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216))
+                    channel.eventLoop.makeCompletedFuture {
+                        try channel.pipeline.syncOperations.addHandler(
+                            ByteToMessageHandler(
+                                LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes),
+                                maximumBufferSize: 16_777_216))
+                    }
                 }
             
             return try await bootstrap.connect(host: "localhost", port: 6680).get()
@@ -165,7 +175,12 @@ struct ConnectionManagerKitTests {
             let bootstrap = ClientBootstrap(group: clientGroup)
                 .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
                 .channelInitializer { channel in
-                    channel.pipeline.addHandler(ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216))
+                    channel.eventLoop.makeCompletedFuture {
+                        try channel.pipeline.syncOperations.addHandler(
+                            ByteToMessageHandler(
+                                LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes),
+                                maximumBufferSize: 16_777_216))
+                    }
                 }
             
             return try await bootstrap.connect(host: "localhost", port: 6681).get()
@@ -217,7 +232,12 @@ struct ConnectionManagerKitTests {
         let bootstrap = ClientBootstrap(group: clientGroup)
             .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .channelInitializer { channel in
-                channel.pipeline.addHandler(ByteToMessageHandler(LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes), maximumBufferSize: 16_777_216))
+                channel.eventLoop.makeCompletedFuture {
+                    try channel.pipeline.syncOperations.addHandler(
+                        ByteToMessageHandler(
+                            LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes),
+                            maximumBufferSize: 16_777_216))
+                }
             }
         let clientChannel = try await bootstrap.connect(host: "localhost", port: 6682).get()
         
@@ -229,8 +249,11 @@ struct ConnectionManagerKitTests {
         #expect(initialMetrics.activeConnections >= 0)
         
         // Shutdown
-        // Close the client channel before shutting down the listener to avoid event loop precondition failures
-        try await clientChannel.close(mode: .all)
+        // Close the client channel before shutting down the listener to avoid event loop precondition failures.
+        // The peer may already have torn the socket down; POSIX NIO then throws `alreadyClosed`.
+        if clientChannel.isActive {
+            try? await clientChannel.close(mode: .all)
+        }
         try await Task.sleep(for: .milliseconds(200))
         try await listener.shutdown()
         #expect((await listener.getMetrics()).activeConnections >= 0) // Metrics not reset on shutdown
