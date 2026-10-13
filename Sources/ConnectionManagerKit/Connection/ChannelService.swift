@@ -75,6 +75,9 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
     
     /// The continuation for the outbound writer stream.
     var continuation: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation?
+
+    /// Set by `shutdown()` so `run()` can tell an intentional close from a fault.
+    private var isShuttingDown = false
     
     /// Updates the configuration for this channel service.
     ///
@@ -157,10 +160,12 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
     /// ```
     public func run() async throws {
         do {
-            try await exectuteTask()
+            try await executeTask()
         } catch {
-            // Cancellation is an orderly shutdown, not a channel fault.
-            if !(error is CancellationError) {
+            // Cancellation is an orderly shutdown, not a channel fault, and neither is
+            // the closed-channel error that follows our own `shutdown()` (replacement,
+            // eviction, manager shutdown).
+            if !(error is CancellationError) && !(isShuttingDown && Self.isClosedChannelError(error)) {
                 await contextDelegate?.reportChildChannel(error: error, id: config.cacheKey)
             }
             await contextDelegate?.didShutdownChildChannel()
@@ -168,12 +173,19 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
         }
         await contextDelegate?.didShutdownChildChannel()
     }
+
+    private static func isClosedChannelError(_ error: any Error) -> Bool {
+        if let channelError = error as? ChannelError, case .ioOnClosedChannel = channelError {
+            return true
+        }
+        return false
+    }
     
     /// Executes the main task for the child channel service.
     ///
     /// This private method handles the core logic of setting up streams, processing
     /// inbound and outbound data, and coordinating with delegates.
-    nonisolated private func exectuteTask() async throws {
+    nonisolated private func executeTask() async throws {
         guard let childChannel else { return }
         // Close the socket from cancellation so POSIX NIO unblocks executeThenClose.
         // Awaiting channel.close() from shutdown() while this iterator is live
@@ -268,6 +280,7 @@ public actor ChildChannelService<Inbound: Sendable, Outbound: Sendable>: Service
     /// }
     /// ```
     func shutdown() async throws {
+        isShuttingDown = true
         finishOutboundStream()
         // Fire-and-forget: executeThenClose owns the close. Waiting here races
         // the inbound iterator on the same event loop and hangs on Linux.

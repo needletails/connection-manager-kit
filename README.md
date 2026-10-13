@@ -7,7 +7,7 @@
 )](https://developer.apple.com)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-A modern, cross-platform networking framework built on SwiftNIO for managing network connections with automatic reconnection, TLS support, and comprehensive event monitoring.
+A modern, cross-platform networking framework built on SwiftNIO for managing network connections with retried connection establishment, TLS support, and comprehensive event monitoring.
 
 ## 🚀 Features
 
@@ -18,8 +18,8 @@ A modern, cross-platform networking framework built on SwiftNIO for managing net
 - **Swift 6.3+** - Strict-concurrency-ready Swift package, validated on Swift 6.4
 - **Async/Await** - Modern concurrency throughout
 
-### 🔄 Automatic Connection Management
-- **Smart Reconnection** - Built-in retry logic with exponential backoff
+### 🔄 Connection Management
+- **Connect Retries** - Built-in retry logic (fixed, exponential backoff, custom) for establishing each connection
 - **Advanced Retry Strategies** - Fixed delay, exponential backoff with jitter, and custom retry policies
 - **Parallel Connections** - Concurrent connection establishment for improved performance
 - **Bounded Connection Caching** - Keyed reuse with FIFO/LRU eviction and TTL support
@@ -175,7 +175,7 @@ await manager.gracefulShutdown()
 
 ## 🌐 WebSocket APIs
 
-High-level WebSocket client built on top of `ConnectionManagerKit` with automatic reconnection and main-actor event delivery.
+High-level WebSocket client built on top of `ConnectionManagerKit` with retried connection establishment, heartbeat (ping/pong) supervision, and main-actor event delivery. When a route closes (server Close frame, heartbeat timeout, network loss) the client publishes `.channelInactive` on `socketReceiver.eventStream` and removes the route; call `connect` again from that event to re-establish it.
 
 ### Quick Start (Client)
 
@@ -431,34 +431,58 @@ ConnectionManagerKit/
 
 ## 🔄 Connection Management
 
-### Automatic Reconnection
+### Connect Retries and Reconnecting
+
+`maxReconnectionAttempts` and `retryStrategy` govern establishing a connection:
 
 ```swift
-// Configure reconnection settings
 try await manager.connect(
     to: servers,
-    maxReconnectionAttempts: 5,  // Maximum retry attempts
-    timeout: .seconds(10)         // Connection timeout
+    maxReconnectionAttempts: 5,  // Attempts for the initial connection to each server
+    timeout: .seconds(10)         // Per-attempt connection timeout
 )
+```
+
+Once a connection is up and later closes, the manager evicts it from the cache and calls
+`ChannelContextDelegate.didShutdownChildChannel()`; it does **not** reconnect by itself. Reconnect
+from that event (no timers needed, the close is the trigger):
+
+```swift
+final class MyContextDelegate: ChannelContextDelegate {
+    func didShutdownChildChannel() async {
+        // Decide whether this close should be followed by a new connection.
+        try? await manager.connect(to: [server])
+    }
+    // ...
+}
 ```
 
 ### Network Event Monitoring
 
+`handleNetworkEvents` runs on a detached task, so `connect` is not blocked by inline iteration.
+Replace your consuming task when a new stream arrives (reconnect). Streams finish when the channel
+closes.
+
 ```swift
-class MyConnectionDelegate: ConnectionDelegate {
+final class MyConnectionDelegate: ConnectionDelegate {
+    private let eventsTask = NIOLockedValueBox<Task<Void, Never>?>(nil)
+
     func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>, id: String) async {
-        for await event in stream {
-            switch event {
-            case .viabilityChanged(let update):
-                print("Connection \(id) viability: \(update.isViable)")
-            case .betterPathAvailable(let path):
-                print("Better path available for \(id)")
-            case .waitingForConnectivity(let error):
-                print("Waiting for connectivity: \(error)")
-            default:
-                break
+        let task = Task {
+            for await event in stream {
+                switch event {
+                case .viabilityChanged(let update):
+                    print("Connection \(id) viability: \(update.isViable)")
+                case .betterPathAvailable:
+                    print("Better path available for \(id)")
+                case .waitingForConnectivity(let error):
+                    print("Waiting for connectivity: \(error)")
+                default:
+                    break
+                }
             }
         }
+        eventsTask.withLockedValue { $0?.cancel(); $0 = task }
     }
 }
 ```

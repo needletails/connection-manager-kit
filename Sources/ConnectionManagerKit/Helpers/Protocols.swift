@@ -56,7 +56,9 @@ extension ChildChannelServiceDelegate {
 ///
 /// ## Usage Example
 /// ```swift
-/// class MyConnectionDelegate: ConnectionDelegate {
+/// final class MyConnectionDelegate: ConnectionDelegate {
+///     private let eventsTask = NIOLockedValueBox<Task<Void, Never>?>(nil)
+///
 ///     func handleError(_ stream: AsyncStream<NWError>, id: String) {
 ///         Task {
 ///             for await error in stream {
@@ -64,25 +66,34 @@ extension ChildChannelServiceDelegate {
 ///             }
 ///         }
 ///     }
-///     
+///
 ///     func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>, id: String) async {
-///         for await event in stream {
-///             switch event {
-///             case .viabilityChanged(let update):
-///                 print("Network viability changed: \(update.isViable)")
-///             case .betterPathAvailable(let path):
-///                 print("Better network path available")
-///             default:
-///                 break
+///         // Consume on a separate task and return immediately (see Important below).
+///         let task = Task {
+///             for await event in stream {
+///                 switch event {
+///                 case .viabilityChanged(let update):
+///                     print("Network viability changed: \(update.isViable)")
+///                 case .betterPathAvailable:
+///                     print("Better network path available")
+///                 default:
+///                     break
+///                 }
 ///             }
 ///         }
+///         eventsTask.withLockedValue { $0?.cancel(); $0 = task }
 ///     }
-///     
+///
 ///     func initializedChildChannel<Outbound, Inbound>(_ context: ChannelContext<Inbound, Outbound>) async {
 ///         print("Child channel initialized: \(context.id)")
 ///     }
 /// }
 /// ```
+///
+/// - Important: `ConnectionManager` delivers the event stream from a detached task, so
+///   `connect(to:)` returns even if you iterate inline. For work that must run before
+///   consumption starts, hand the stream to your own task and return immediately.
+///   Replace the consuming task when a new stream arrives (reconnect), so events are not dropped.
 public protocol ConnectionDelegate: AnyObject, Sendable {
     #if canImport(Network)
     /// Handles network errors that occur on the connection.
@@ -100,6 +111,9 @@ public protocol ConnectionDelegate: AnyObject, Sendable {
     /// This method is called when network events occur, such as path changes,
     /// viability updates, or connectivity changes. The events are provided as an
     /// async stream for continuous monitoring.
+    ///
+    /// - Important: On reconnect, a new stream replaces the previous one; cancel any prior
+    ///   consuming task so only the latest stream is read.
     ///
     /// - Parameters:
     ///   - stream: An async stream of `NetworkEventMonitor.NetworkEvent` instances.
@@ -120,6 +134,9 @@ public protocol ConnectionDelegate: AnyObject, Sendable {
     ///
     /// This method is called when NIO-specific events occur on non-Apple platforms.
     /// The events are provided as an async stream for continuous monitoring.
+    ///
+    /// - Important: On reconnect, a new stream replaces the previous one; cancel any prior
+    ///   consuming task so only the latest stream is read.
     ///
     /// - Parameters:
     ///   - stream: An async stream of `NetworkEventMonitor.NIOEvent` instances.
@@ -209,7 +226,13 @@ public protocol ChannelContextDelegate: AnyObject, Sendable {
     /// Called when a child channel has been shut down.
     ///
     /// This method is called when a child channel has been completely shut down
-    /// and is no longer available for use.
+    /// and is no longer available for use. On the client this is the event to
+    /// reconnect from if the connection should be re-established; the manager
+    /// does not reconnect on its own.
+    ///
+    /// - Note: This callback carries no connection identifier. A delegate shared
+    ///   between several `ServerLocation`s cannot tell which one shut down, so use
+    ///   one context delegate per connection when that distinction matters.
     func didShutdownChildChannel() async
     
     /// Delivers a writer context for sending data through a channel.

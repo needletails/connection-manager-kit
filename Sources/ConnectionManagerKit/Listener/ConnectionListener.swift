@@ -22,18 +22,22 @@ import Logging
 import Metrics
 
 /// Configuration for listener performance and behavior optimization.
+///
+/// Only `maxConcurrentConnections` and `enableConnectionMonitoring` affect behavior.
+/// The remaining fields are retained for source compatibility and are not consumed
+/// by the listener.
 public struct ListenerConfiguration: Sendable {
     /// Maximum number of concurrent connections to accept.
     public let maxConcurrentConnections: Int
-    /// Connection accept timeout.
+    /// Not consumed: accepts are not timed out by the listener.
     public let acceptTimeout: TimeAmount
-    /// Whether to enable connection monitoring.
+    /// Whether to compute the accept-rate metric.
     public let enableConnectionMonitoring: Bool
-    /// Legacy compatibility setting. Listener rebinding is not automated.
+    /// Not consumed: listener rebinding is not automated.
     public let enableAutoRecovery: Bool
-    /// Legacy recovery-attempt setting.
+    /// Not consumed: listener rebinding is not automated.
     public let maxRecoveryAttempts: Int
-    /// Legacy recovery-delay setting.
+    /// Not consumed: listener rebinding is not automated.
     public let recoveryDelay: TimeAmount
     
     public init(
@@ -65,9 +69,10 @@ public struct ListenerMetrics: Sendable {
     public var acceptRate: Double
     /// Average connection duration.
     public var averageConnectionDuration: TimeAmount
-    /// Legacy recovery count. Automatic listener recovery is not performed.
+    /// Always zero. Automatic listener recovery is not performed.
     public var recoveryAttempts: Int
-    /// Number of connection errors.
+    /// Number of errors reported through `ConnectionListener.reportConnectionError()`.
+    /// The listener does not increment this on its own.
     public var connectionErrors: Int
     
     public init(
@@ -108,10 +113,8 @@ public protocol ListenerMetricsDelegate: AnyObject, Sendable {
     ///   - duration: The duration the connection was active
     func connectionDidClose(connectionId: String, activeConnections: Int, duration: TimeAmount)
     
-    /// Legacy callback retained for source compatibility.
-    /// - Parameters:
-    ///   - attemptNumber: The current recovery attempt number
-    ///   - maxAttempts: The maximum number of recovery attempts
+    /// Never called. Retained for source compatibility; automatic listener recovery is not performed.
+    @available(*, deprecated, message: "Never called; automatic listener recovery is not performed.")
     func recoveryDidAttempt(attemptNumber: Int, maxAttempts: Int)
 }
 
@@ -197,9 +200,9 @@ public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceL
             address = try SocketAddress
                 .makeAddressResolvingHost(host, port: configuration.port)
         } else {
-            var addr = sockaddr_in()
-            addr.sin_port = in_port_t(configuration.port).bigEndian
-            address = SocketAddress(addr, host: "*")
+            // Wildcard bind. Build a fully-formed AF_INET address rather than a
+            // zero-initialised sockaddr_in with only the port set.
+            address = try SocketAddress(ipAddress: "0.0.0.0", port: configuration.port)
         }
         
         let origin: String = {
@@ -388,7 +391,10 @@ public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceL
         """
     }
     
-    /// Reports a connection error from the server service
+    /// Increments the `connectionErrors` metric.
+    ///
+    /// The listener never calls this itself; it exists so adopters can fold
+    /// application-level connection failures into the listener's metrics.
     public func reportConnectionError() {
         updateMetricsOnConnectionError()
     }

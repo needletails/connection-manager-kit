@@ -178,6 +178,7 @@ public struct WebSocketOptions: Sendable {
     public let minNonFinalFragmentSize: Int
     public let maxAccumulatedFrameCount: Int
     public let maxAccumulatedFrameSize: Int
+    /// Not consumed: permessage-deflate is not negotiated by the client.
     public var enableCompression: Bool
     
     public init(

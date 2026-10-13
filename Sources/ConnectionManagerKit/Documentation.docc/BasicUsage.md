@@ -302,7 +302,8 @@ class MyChannelContextDelegate: ChannelContextDelegate {
 ```swift
 class MyConnectionDelegate: ConnectionDelegate {
     func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>, id: String) async {
-        for await event in stream {
+        Task {
+            for await event in stream {
             switch event {
             case .viabilityChanged(let update):
                 if update.isViable {
@@ -322,6 +323,7 @@ class MyConnectionDelegate: ConnectionDelegate {
                 
             default:
                 break
+            }
             }
         }
     }
