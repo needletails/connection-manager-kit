@@ -128,9 +128,6 @@ public struct TLSPreKeyedConfiguration: Sendable {
 /// ```
 public protocol ConnectionManagerDelegate: AnyObject, Sendable {
     
-    associatedtype Inbound: Sendable
-    associatedtype Outbound: Sendable
-    
     /// Retrieves an array of custom channel handlers required by the consumer.
     ///
     /// This method allows the delegate to specify any additional handlers that should be added to the
@@ -138,23 +135,7 @@ public protocol ConnectionManagerDelegate: AnyObject, Sendable {
     ///
     /// - Returns: An array of `ChannelHandler` instances to be added to the connection pipeline.
     func retrieveChannelHandlers() -> [ChannelHandler]
-    
-    /// Delivers the `NIOAsyncChannel` to the delegate for further configuration.
-    ///
-    /// This method provides access to the underlying `NIOChannel`, allowing the delegate to set up
-    /// connection-specific delegates. It is essential to call this method in order to properly configure
-    /// the connection manager by invoking the `setDelegates(connectionDelegate:contextDelegate:cacheKey:)`
-    /// method with the conforming instances of `ConnectionDelegate` and `ChannelContextDelegate`.
-    ///
-    /// - Parameters:
-    ///   - channel: The `NIOAsyncChannel<Inbound, Outbound>` instance that represents the connection.
-    ///   - manager: The `ConnectionManager<Inbound, Outbound>` instance responsible for managing the connection.
-    ///   - cacheKey: A unique identifier for the connection in the cache.
-    ///
-    /// - Note: This method is asynchronous and should be awaited.
-    @available(*, deprecated, message: "This method is deprecated and will be removed in a future version. Use channelCreated(_:cacheKey:) instead.")
-    func deliverChannel(_ channel: NIOAsyncChannel<Inbound, Outbound>, manager: ConnectionManager<Inbound, Outbound>, cacheKey: String) async
-    
+
     /// Called when a channel is created.
     ///
     /// This method is called when a channel is created. It is used to notify the delegate that a channel has been created.
@@ -163,10 +144,6 @@ public protocol ConnectionManagerDelegate: AnyObject, Sendable {
     ///   - eventLoop: The event loop that the channel is created on.
     ///   - cacheKey: A unique identifier for the connection in the cache.
     func channelCreated(_ eventLoop: EventLoop, cacheKey: String) async
-}
-
-extension ConnectionManagerDelegate {
-    public func deliverChannel(_ channel: NIOAsyncChannel<Inbound, Outbound>, manager: ConnectionManager<Inbound, Outbound>, cacheKey: String) async {}
 }
 
 /// Configuration for connection retry strategies.
@@ -385,11 +362,9 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         """
     }
     
-    /// Sets the delegate with proper type safety.
-    ///
-    /// This method ensures that the delegate has matching generic types.
-    /// - Parameter delegate: The delegate to set, must have matching Inbound and Outbound types.
-    public func setDelegate<D: ConnectionManagerDelegate>(_ delegate: D) where D.Inbound == Inbound, D.Outbound == Outbound {
+    /// Sets the delegate that supplies channel handlers and receives channel-created events.
+    /// - Parameter delegate: The delegate to set.
+    public func setDelegate(_ delegate: any ConnectionManagerDelegate) {
         self.delegate = delegate
     }
     

@@ -112,10 +112,7 @@ public protocol ListenerMetricsDelegate: AnyObject, Sendable {
     ///   - activeConnections: The current number of active connections
     ///   - duration: The duration the connection was active
     func connectionDidClose(connectionId: String, activeConnections: Int, duration: TimeAmount)
-    
-    /// Never called. Retained for source compatibility; automatic listener recovery is not performed.
-    @available(*, deprecated, message: "Never called; automatic listener recovery is not performed.")
-    func recoveryDidAttempt(attemptNumber: Int, maxAttempts: Int)
+
 }
 
 /// Default implementation for optional delegate methods

@@ -72,33 +72,6 @@ public struct CacheConfiguration: Sendable {
     }
 }
 
-/// Legacy pooling configuration retained for source compatibility.
-///
-/// ConnectionManagerKit provides a keyed cache and does not consume this configuration.
-@available(*, deprecated, message: "ConnectionManagerKit provides a keyed connection cache, not a multi-checkout connection pool.")
-public struct ConnectionPoolConfiguration: Sendable {
-    /// Legacy minimum connection setting.
-    public let minConnections: Int
-    /// Legacy maximum connection setting.
-    public let maxConnections: Int
-    /// Legacy acquisition timeout setting.
-    public let acquireTimeout: TimeAmount
-    /// Legacy idle timeout setting.
-    public let maxIdleTime: TimeAmount
-    
-    public init(
-        minConnections: Int = 0,
-        maxConnections: Int = 10,
-        acquireTimeout: TimeAmount = .seconds(30),
-        maxIdleTime: TimeAmount = .seconds(300)
-    ) {
-        self.minConnections = minConnections
-        self.maxConnections = maxConnections
-        self.acquireTimeout = acquireTimeout
-        self.maxIdleTime = maxIdleTime
-    }
-}
-
 /// A thread-safe cache for managing network connections.
 ///
 /// `ConnectionCache` provides efficient storage and retrieval of active network connections

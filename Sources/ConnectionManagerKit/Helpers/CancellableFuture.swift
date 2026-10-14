@@ -70,7 +70,7 @@ enum CancellableFuture {
         _ channel: Channel,
         configuration: NIOAsyncChannel<Inbound, Outbound>.Configuration = .init()
     ) throws -> NIOAsyncChannel<Inbound, Outbound> {
-        try NIOAsyncChannel(synchronouslyWrapping: channel, configuration: configuration)
+        try NIOAsyncChannel(wrappingChannelSynchronously: channel, configuration: configuration)
     }
 
     static func discard(_ channel: Channel) {

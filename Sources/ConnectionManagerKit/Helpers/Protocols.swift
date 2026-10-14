@@ -278,15 +278,7 @@ public protocol ChannelContextDelegate: AnyObject, Sendable {
 /// }
 /// ```
 public protocol ListenerDelegate: AnyObject, Sendable, TCPListenerDelegate, WebSocketListenerDelegate {
-    /// Called when the server has successfully bound to its address and is listening for connections.
-    ///
-    /// This method is called when the server has been successfully set up and is
-    /// ready to accept incoming connections.
-    ///
-    /// - Parameter channel: The server channel that is now listening for connections.
-    @available(*, deprecated, renamed: "didBindTCPServer")
-    func didBindServer<Inbound: Sendable, Outbound: Sendable>(channel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>) async
-    
+
     /// Retrieves an SSL handler for secure connections.
     ///
     /// This method should return an SSL handler if the server should support
