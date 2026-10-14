@@ -787,7 +787,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
             }
             
             if useWebSocket {
-                let upgrades = ChannelProducts<EventLoopFuture<UpgradeResult>>()
+                let upgrades = ChannelProducts<EventLoopFuture<UpgradeResult>>(discard: discardUpgrade)
                 // The async `connect` overload waits with `EventLoopFuture.get()`, which ignores
                 // cancellation. The future-returning connect is resolved below instead.
                 let connected = client.channelInitializer { channel in
@@ -795,7 +795,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                 }.connect(host: server.host, port: server.port)
                 return try await finishWebSocket(connected, upgrades: upgrades)
             } else {
-                let produced = ChannelProducts<NIOAsyncChannel<Inbound, Outbound>>()
+                let produced = ChannelProducts<NIOAsyncChannel<Inbound, Outbound>>(discard: CancellableFuture.discard)
                 let connected = client
                     .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
                     .channelInitializer { channel in
@@ -837,7 +837,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
             .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
         
         if useWebSocket {
-            let upgrades = ChannelProducts<EventLoopFuture<UpgradeResult>>()
+            let upgrades = ChannelProducts<EventLoopFuture<UpgradeResult>>(discard: discardUpgrade)
             // The async `connect` overload waits with `EventLoopFuture.get()`, which ignores
             // cancellation. The future-returning connect is resolved below instead.
             let connected = connection.channelInitializer { channel in
@@ -845,7 +845,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
             }.connect(host: server.host, port: server.port)
             return try await finishWebSocket(connected, upgrades: upgrades)
         } else {
-            let produced = ChannelProducts<NIOAsyncChannel<Inbound, Outbound>>()
+            let produced = ChannelProducts<NIOAsyncChannel<Inbound, Outbound>>(discard: CancellableFuture.discard)
             let connected = connection.channelInitializer { channel in
                 createHandlers(channel, server: server).map { produced.store($0, on: channel) }
             }.connect(host: server.host, port: server.port)
@@ -878,6 +878,16 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
             }
             return try await resolveUpgrade(upgradeResult, channel: channel)
         }
+
+        /// Drops an upgrade nobody will consume; a completed upgrade owns a wrapped channel
+        /// whose writer must be finished rather than released.
+        @Sendable func discardUpgrade(_ upgrade: EventLoopFuture<UpgradeResult>) {
+            upgrade.whenSuccess { result in
+                if case .websocket(let websocketChannel) = result {
+                    CancellableFuture.discard(websocketChannel)
+                }
+            }
+        }
         
         /// Resolves the upgrade future into a typed channel. `connectWebSocket` is
         /// constrained to `WebSocketFrame` managers, so the cast only fails if the
@@ -889,6 +899,8 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
             let result: UpgradeResult
             do {
                 result = try await CancellableFuture.resolve(upgradeResult) {
+                    // The upgrade may still complete; finish whatever it produces.
+                    discardUpgrade(upgradeResult)
                     CancellableFuture.discard(channel)
                 }
             } catch {
@@ -898,7 +910,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
             switch result {
             case .websocket(let websocketChannel):
                 guard let typed = websocketChannel as? NIOAsyncChannel<Inbound, Outbound> else {
-                    CancellableFuture.discard(websocketChannel.channel)
+                    CancellableFuture.discard(websocketChannel)
                     throw Errors.websocketUpgradeFailed
                 }
                 return typed

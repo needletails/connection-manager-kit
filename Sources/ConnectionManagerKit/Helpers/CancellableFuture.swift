@@ -35,13 +35,34 @@ final class CancelFlag: @unchecked Sendable {
 ///
 /// Happy Eyeballs can invoke the initializer once per address. The winning channel is the one
 /// the connect future returns, so products are stored by channel and only that one is taken.
+///
+/// Every other product is passed to `discard`: on `take`, when it is stored after `take`, or
+/// when the container goes away because the connect failed or was cancelled. A product that
+/// wraps a `NIOAsyncChannel` must be finished rather than dropped (see `CancellableFuture.wrap`).
 final class ChannelProducts<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [ObjectIdentifier: Value] = [:]
+    private var taken = false
+    private let discard: @Sendable (Value) -> Void
+
+    init(discard: @escaping @Sendable (Value) -> Void) {
+        self.discard = discard
+    }
+
+    deinit {
+        for value in values.values {
+            discard(value)
+        }
+    }
 
     func store(_ value: Value, on channel: Channel) {
         let id = ObjectIdentifier(channel)
         lock.lock()
+        if taken {
+            lock.unlock()
+            discard(value)
+            return
+        }
         values[id] = value
         lock.unlock()
     }
@@ -49,8 +70,15 @@ final class ChannelProducts<Value>: @unchecked Sendable {
     func take(from channel: Channel) -> Value? {
         let id = ObjectIdentifier(channel)
         lock.lock()
-        defer { lock.unlock() }
-        return values.removeValue(forKey: id)
+        taken = true
+        let value = values.removeValue(forKey: id)
+        let losers = Array(values.values)
+        values.removeAll()
+        lock.unlock()
+        for loser in losers {
+            discard(loser)
+        }
+        return value
     }
 }
 
@@ -60,12 +88,12 @@ final class ChannelProducts<Value>: @unchecked Sendable {
 /// completes. These waits return `CancellationError` immediately. A connect that finishes
 /// afterward is closed, matching HTTPConnectionKit.
 enum CancellableFuture {
-    /// Wraps `channel` so releasing the `NIOAsyncChannel` finishes its writer.
+    /// Wraps `channel` in a `NIOAsyncChannel`.
     ///
-    /// `wrappingChannelSynchronously` leaves `finishOnDeinit` off. If the channel is released
-    /// before `channelActive` — a cancelled connect, a Happy Eyeballs loser, or an accept whose
-    /// async sequence already ended — `channelActive` drops the handler's last writer reference
-    /// and traps with "Deinited NIOAsyncWriter without calling finish()".
+    /// The result owns an unfinished `NIOAsyncWriter`. Releasing it without `executeThenClose`
+    /// (or finishing the writer) traps with "Deinited NIOAsyncWriter without calling finish()",
+    /// so every caller must hand the value to an owner or discard it through `executeThenClose`.
+    /// A channel that closed before it was wrapped is safe: the closed sink finishes the writer.
     static func wrap<Inbound: Sendable, Outbound: Sendable>(
         _ channel: Channel,
         configuration: NIOAsyncChannel<Inbound, Outbound>.Configuration = .init()
@@ -75,6 +103,13 @@ enum CancellableFuture {
 
     static func discard(_ channel: Channel) {
         channel.close(promise: nil)
+    }
+
+    /// Finishes the writer and closes a wrapped channel nobody will use.
+    static func discard<Inbound: Sendable, Outbound: Sendable>(_ channel: NIOAsyncChannel<Inbound, Outbound>) {
+        Task {
+            try? await channel.executeThenClose { _, _ in }
+        }
     }
 
     /// Waits for a connect future and closes the channel if the task is cancelled first.

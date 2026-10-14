@@ -183,13 +183,13 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                 
                 await listenerDelegate?.didBindWebSocketServer(channel: serverChannel)
                 
-                try await serverChannel.executeThenClose { @Sendable inbound in
+                try await runAcceptLoop(serverChannel) { [self] inbound, stopped in
                     try await withThrowingDiscardingTaskGroup { group in
-                        for try await childChannelFuture in inbound.cancelOnGracefulShutdown() {
+                        for try await childChannelFuture in inbound {
                             guard await canAcceptConnection() else {
                                 logger.log(level: .warning, message: "Connection limit reached, rejecting new connection")
-                                // The upgrade may still be in flight; close whatever it produces.
-                                childChannelFuture.whenSuccess { $0.channel.close(promise: nil) }
+                                // The upgrade may still be in flight; finish and close whatever it produces.
+                                childChannelFuture.whenSuccess { CancellableFuture.discard($0) }
                                 continue
                             }
                             
@@ -207,9 +207,9 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                                 do {
                                     // `.get()` ignores cancellation and left this task running
                                     // after the listener had shut down. A handshake that finishes
-                                    // afterward closes its channel.
+                                    // afterward is finished and closed.
                                     childChannel = try await CancellableFuture.resolve(childChannelFuture) { channel in
-                                        channel.channel.close(promise: nil)
+                                        CancellableFuture.discard(channel)
                                     }
                                 } catch {
                                     await self.upgradeDidFail(error)
@@ -217,6 +217,9 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                                 }
                                 await self.handleChildChannelWithRecovery(childChannel)
                             }
+                        }
+                        if stopped.isCancelled {
+                            group.cancelAll()
                         }
                     }
                 }
@@ -304,14 +307,14 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
     private func handleChildChannelsOptimized(
         serverChannel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>
     ) async throws {
-        try await serverChannel.executeThenClose { @Sendable inbound in
+        try await runAcceptLoop(serverChannel) { [self] inbound, stopped in
             // Use optimized task group for better concurrency
             try await withThrowingDiscardingTaskGroup { group in
-                for try await childChannel in inbound.cancelOnGracefulShutdown() {
+                for try await childChannel in inbound {
                     // Check connection limits before accepting
                     guard await canAcceptConnection() else {
                         logger.log(level: .warning, message: "Connection limit reached, rejecting new connection")
-                        try? await childChannel.channel.close()
+                        try? await childChannel.executeThenClose { _, _ in }
                         continue
                     }
                     
@@ -324,7 +327,45 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                         await self.handleChildChannelWithRecovery(childChannel)
                     }
                 }
+                if stopped.isCancelled {
+                    group.cancelAll()
+                }
             }
+        }
+    }
+
+    /// Runs `body` as the accept loop of `serverChannel`.
+    ///
+    /// Graceful shutdown and task cancellation close the listening socket; they do not cancel
+    /// the `inbound` iteration. Cancelling the iteration drops the accepted channels still
+    /// buffered in `inbound`. Each of those owns an unfinished `NIOAsyncWriter`, and releasing
+    /// it traps once the child becomes active ("Deinited NIOAsyncWriter without calling
+    /// finish()"). Closing the socket ends `inbound` after the buffered children have been
+    /// delivered, so every accepted channel is handled or discarded through `executeThenClose`.
+    ///
+    /// `stopped` is set when the surrounding task was cancelled, so `body` can cancel the
+    /// connections it started once the loop ends.
+    private func runAcceptLoop<Element: Sendable>(
+        _ serverChannel: NIOAsyncChannel<Element, Never>,
+        _ body: @escaping @Sendable (NIOAsyncChannelInboundStream<Element>, CancelFlag) async throws -> Void
+    ) async throws {
+        let stopped = CancelFlag()
+        // Unstructured on purpose: cancelling this task would cancel the iteration.
+        // It ends when the listening socket closes, which the handlers below trigger.
+        let acceptTask = Task {
+            try await withGracefulShutdownHandler {
+                try await serverChannel.executeThenClose { inbound in
+                    try await body(inbound, stopped)
+                }
+            } onGracefulShutdown: {
+                serverChannel.channel.close(promise: nil)
+            }
+        }
+        try await withTaskCancellationHandler {
+            try await acceptTask.value
+        } onCancel: {
+            stopped.cancel()
+            serverChannel.channel.close(promise: nil)
         }
     }
     
