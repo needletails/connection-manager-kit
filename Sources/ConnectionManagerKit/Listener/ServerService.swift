@@ -205,7 +205,12 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                                 guard let self else { return }
                                 let childChannel: NIOAsyncChannel<Inbound, Outbound>
                                 do {
-                                    childChannel = try await childChannelFuture.get()
+                                    // `.get()` ignores cancellation and left this task running
+                                    // after the listener had shut down. A handshake that finishes
+                                    // afterward closes its channel.
+                                    childChannel = try await CancellableFuture.resolve(childChannelFuture) { channel in
+                                        channel.channel.close(promise: nil)
+                                    }
                                 } catch {
                                     await self.upgradeDidFail(error)
                                     return
@@ -347,9 +352,10 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
         decrementActiveConnections()
         if case ServerServiceErrors.nonWebSocketRequestRejected = error {
             logger.log(level: .info, message: "Rejected plain HTTP request on WebSocket listener")
-        } else {
-            logger.log(level: .debug, message: "WebSocket upgrade failed: \(error)")
+            return
         }
+        guard !(error is CancellationError) else { return }
+        logger.log(level: .debug, message: "WebSocket upgrade failed: \(error)")
     }
 
     private func canAcceptConnection() async -> Bool {
@@ -382,7 +388,9 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
         }
 
         do {
-            try await stopPromise.futureResult.get()
+            try await stopPromise.futureResult.getAbandoningOnCancel()
+        } catch is CancellationError {
+            return
         } catch {
             logger.log(level: .trace, message: "There was a problem stopping TLS \(error)")
         }

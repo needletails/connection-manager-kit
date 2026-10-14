@@ -570,6 +570,32 @@ struct ReviewRegressionTests {
         #expect(metrics.parallelCompletions.first?.failed == 1)
     }
 
+    @Test("a cancelled future wait returns and closes a channel that connects later")
+    func cancelledFutureWaitClosesALateChannel() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let promise = group.next().makePromise(of: Channel.self)
+        let task = Task {
+            try await CancellableFuture.resolveChannel(promise.futureResult)
+        }
+        task.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await task.value
+        }
+
+        let server = try await ServerBootstrap(group: group)
+            .bind(host: "127.0.0.1", port: 0).get()
+        let port = try #require(server.localAddress?.port)
+        let client = try await ClientBootstrap(group: group)
+            .connect(host: "127.0.0.1", port: port).get()
+        promise.succeed(client)
+
+        #expect(await waitUntil(timeout: .seconds(2)) { !client.isActive })
+        if client.isActive {
+            try await client.close()
+        }
+        try await server.close()
+    }
+
     /// Binds and immediately closes a listener so the port is known to be closed.
     private func reserveClosedPort() async throws -> Int {
         let server = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
