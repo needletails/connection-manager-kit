@@ -75,8 +75,8 @@ extension WebSocketUpgrader {
                                     maxAccumulatedFrameCount: configuration.maxAccumulatedFrameCount,
                                     maxAccumulatedFrameSize: configuration.maxAccumulatedFrameSize))
                             
-                            let asyncChannel = try NIOAsyncChannel<Inbound, Outbound>(
-                                wrappingChannelSynchronously: channel,
+                            let asyncChannel: NIOAsyncChannel<Inbound, Outbound> = try CancellableFuture.wrap(
+                                channel,
                                 configuration: .init(isOutboundHalfClosureEnabled: true)
                             )
                             return asyncChannel
@@ -296,7 +296,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                     if let channelHandlers = self?.serviceListenerDelegate?.retrieveChannelHandlers(), !channelHandlers.isEmpty {
                         try channel.pipeline.syncOperations.addHandlers(channelHandlers)
                     }
-                    return try NIOAsyncChannel(wrappingChannelSynchronously: channel)
+                    return try CancellableFuture.wrap(channel)
                 }
             })
     }

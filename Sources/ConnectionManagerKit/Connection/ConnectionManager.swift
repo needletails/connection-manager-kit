@@ -952,7 +952,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                                 maxAccumulatedFrameCount: webSocketOptions.maxAccumulatedFrameCount,
                                 maxAccumulatedFrameSize: webSocketOptions.maxAccumulatedFrameSize
                             ))
-                            let asyncChannel = try NIOAsyncChannel<WebSocketFrame, WebSocketFrame>(wrappingChannelSynchronously: channel)
+                            let asyncChannel: NIOAsyncChannel<WebSocketFrame, WebSocketFrame> = try CancellableFuture.wrap(channel)
                             return .websocket(asyncChannel)
                         }
                     }
@@ -1009,8 +1009,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                 if let channelHandlers = delegate?.retrieveChannelHandlers(), !channelHandlers.isEmpty {
                     try channel.pipeline.syncOperations.addHandlers(channelHandlers)
                 }
-                return try NIOAsyncChannel<Inbound, Outbound>(
-                    wrappingChannelSynchronously: channel)
+                return try CancellableFuture.wrap(channel)
             }
         }
     }

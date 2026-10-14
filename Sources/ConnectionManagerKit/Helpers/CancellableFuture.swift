@@ -60,6 +60,19 @@ final class ChannelProducts<Value>: @unchecked Sendable {
 /// completes. These waits return `CancellationError` immediately. A connect that finishes
 /// afterward is closed, matching HTTPConnectionKit.
 enum CancellableFuture {
+    /// Wraps `channel` so releasing the `NIOAsyncChannel` finishes its writer.
+    ///
+    /// `wrappingChannelSynchronously` leaves `finishOnDeinit` off. If the channel is released
+    /// before `channelActive` — a cancelled connect, a Happy Eyeballs loser, or an accept whose
+    /// async sequence already ended — `channelActive` drops the handler's last writer reference
+    /// and traps with "Deinited NIOAsyncWriter without calling finish()".
+    static func wrap<Inbound: Sendable, Outbound: Sendable>(
+        _ channel: Channel,
+        configuration: NIOAsyncChannel<Inbound, Outbound>.Configuration = .init()
+    ) throws -> NIOAsyncChannel<Inbound, Outbound> {
+        try NIOAsyncChannel(synchronouslyWrapping: channel, configuration: configuration)
+    }
+
     static func discard(_ channel: Channel) {
         channel.close(promise: nil)
     }
