@@ -605,21 +605,24 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                 tlsPreKeyed: tlsPreKeyed,
                 transport: transport)
 
+            // A wrapped channel nobody will run must be finished through
+            // `executeThenClose`, not just closed: dropping it after a bare close
+            // relies on NIO finishing the writer sink before the close promise fires.
             guard !isShuttingDown else {
-                try? await childChannel.channel.close()
+                CancellableFuture.discard(childChannel)
                 throw CancellationError()
             }
-            
+
             let connectionTime = TimeAmount.now - startTime
             let monitor: NetworkEventMonitor
             do {
                 monitor = try await CancellableFuture.resolve(
                     childChannel.channel.pipeline.handler(type: NetworkEventMonitor.self)
                 ) {
-                    childChannel.channel.close(promise: nil)
+                    CancellableFuture.discard(childChannel)
                 }
             } catch {
-                try? await childChannel.channel.close()
+                CancellableFuture.discard(childChannel)
                 throw error
             }
             

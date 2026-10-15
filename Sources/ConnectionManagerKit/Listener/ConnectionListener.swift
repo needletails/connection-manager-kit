@@ -213,6 +213,11 @@ public actor ConnectionListener<Inbound: Sendable, Outbound: Sendable>: ServiceL
         return configuration
     }
     
+    /// Binds a TCP listener and runs it until shutdown.
+    ///
+    /// - Note: One listener instance runs one server at a time. Calling `listen` again on
+    ///   an instance that is still running replaces `serverService` and `serviceGroup`
+    ///   without stopping the previous server; call `shutdown()` first.
     public func listen(
         address: SocketAddress,
         configuration: Configuration,

@@ -115,12 +115,9 @@ struct ServerListenerRegressionTests {
 
         let boundPort = try #require(await listenerDelegation.waitForBoundPort())
 
-        let clientGroup = MultiThreadedEventLoopGroup.singleton
         var channels: [Channel] = []
         for _ in 0..<6 {
-            let bootstrap = ClientBootstrap(group: clientGroup)
-                .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-            if let ch = try? await bootstrap.connect(host: "localhost", port: boundPort).get() {
+            if let ch = try? await connectRaw(host: "localhost", port: boundPort) {
                 channels.append(ch)
             }
             try await Task.sleep(for: .milliseconds(50))

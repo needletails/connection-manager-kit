@@ -14,6 +14,7 @@
 
 import Foundation
 import NIOCore
+import NIOConcurrencyHelpers
 import NIOPosix
 import NIOSSL
 import NIOHTTP1
@@ -120,6 +121,8 @@ enum ServerServiceErrors: Error {
     case tlsNotConfigured, websocketUpgradeFailed
     /// A client spoke plain HTTP to a WebSocket listener; it was answered with 426 and closed.
     case nonWebSocketRequestRejected
+    /// A child was accepted while the listener was shutting down; it was closed unwrapped.
+    case listenerClosed
 }
 
 
@@ -136,7 +139,14 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
     nonisolated(unsafe) private weak var serviceListenerDelegate: ServiceListenerDelegate?
 
     private var listeningChannel: Channel?
-    
+    /// Orders listener close against children still travelling from the child
+    /// initializer to the accept loop (see `AcceptGate`).
+    private let acceptGate = AcceptGate()
+    /// Accepted WebSocket sockets whose HTTP upgrade has not completed. A peer that
+    /// never sends an upgrade request would otherwise keep its accept task, and the
+    /// listener's `run()`, alive forever after shutdown.
+    private let pendingHandshakes = NIOLockedValueBox<[ObjectIdentifier: Channel]>([:])
+
     // Optimization: Add connection management
     private var activeConnections = 0
     private var maxConcurrentConnections: Int = 1000
@@ -184,8 +194,11 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                 await listenerDelegate?.didBindWebSocketServer(channel: serverChannel)
                 
                 try await runAcceptLoop(serverChannel) { [self] inbound, stopped in
+                    // Once this loop is gone nothing can own a delivered child; reject late ones.
+                    defer { acceptGate.close() }
                     try await withThrowingDiscardingTaskGroup { group in
                         for try await childChannelFuture in inbound {
+                            acceptGate.endDelivery()
                             guard await canAcceptConnection() else {
                                 logger.log(level: .warning, message: "Connection limit reached, rejecting new connection")
                                 // The upgrade may still be in flight; finish and close whatever it produces.
@@ -218,12 +231,16 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                                 await self.handleChildChannelWithRecovery(childChannel)
                             }
                         }
+                        // The listening socket is closed. Handshakes still waiting for an
+                        // upgrade request can never finish; closing them fails their
+                        // futures so the child tasks above return and this group ends.
+                        closePendingHandshakes()
                         if stopped.isCancelled {
                             group.cancelAll()
                         }
                     }
                 }
-                
+
             } else {
                 let serverChannel = try await createTCPServerChannel()
                 self.listeningChannel = serverChannel.channel
@@ -271,13 +288,49 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
             .childChannelOption(ChannelOptions.recvAllocator, value: AdaptiveRecvByteBufferAllocator())
             .childChannelOption(ChannelOptions.autoRead, value: true),
             options: configuration.transportOptions)
-            .bind(to: address, childChannelInitializer: { [weak self] channel in
+            .bind(to: address, childChannelInitializer: { [weak self, acceptGate] channel in
+                // NIO neither registers nor closes a child whose initializer fails, and it
+                // drops the result silently once the listener is closing, so every failure
+                // path here closes the raw socket itself.
+                guard acceptGate.beginDelivery() else {
+                    channel.close(promise: nil)
+                    return channel.eventLoop.makeFailedFuture(ServerServiceErrors.listenerClosed)
+                }
                 guard let self else {
+                    acceptGate.endDelivery()
+                    channel.close(promise: nil)
                     return channel.eventLoop.makeFailedFuture(ServerServiceErrors.websocketUpgradeFailed)
                 }
-                    return upgradeWebSocket(channel: channel, configuration: websocketConfiguration)
+                let upgrade = upgradeWebSocket(channel: channel, configuration: websocketConfiguration)
+                let pendingHandshakes = self.pendingHandshakes
+                let key = ObjectIdentifier(channel)
+                pendingHandshakes.withLockedValue { $0[key] = channel }
+                upgrade.whenComplete { result in
+                    switch result {
+                    case .success(let upgraded):
+                        upgraded.whenComplete { _ in
+                            pendingHandshakes.withLockedValue { _ = $0.removeValue(forKey: key) }
+                        }
+                    case .failure:
+                        pendingHandshakes.withLockedValue { _ = $0.removeValue(forKey: key) }
+                        acceptGate.endDelivery()
+                        channel.close(promise: nil)
+                    }
+                }
+                return upgrade
             })
-        
+
+    }
+
+    /// Closes every accepted socket still waiting for its WebSocket upgrade.
+    nonisolated private func closePendingHandshakes() {
+        let channels = pendingHandshakes.withLockedValue { pending in
+            defer { pending.removeAll() }
+            return Array(pending.values)
+        }
+        for channel in channels {
+            channel.close(promise: nil)
+        }
     }
     
     private func createTCPServerChannel() async throws -> NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never> {
@@ -291,16 +344,30 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
             .childChannelOption(ChannelOptions.recvAllocator, value: AdaptiveRecvByteBufferAllocator())
             .childChannelOption(ChannelOptions.autoRead, value: true),
             options: configuration.transportOptions)
-            .bind(to: address, childChannelInitializer: { [weak self] channel in
-                channel.eventLoop.makeCompletedFuture {
-                    if let sslHandler = self?.serviceListenerDelegate?.retrieveSSLHandler() {
-                        try channel.pipeline.syncOperations.addHandler(sslHandler)
+            .bind(to: address, childChannelInitializer: { [weak self, acceptGate] channel in
+                // Runs on the child's event loop. The wrapped channel owns an unfinished
+                // writer, so it is only created once the gate guarantees the accept loop
+                // will receive it; a failed initializer closes the raw socket because NIO
+                // does not (see `AcceptGate`).
+                let wrapped: EventLoopFuture<NIOAsyncChannel<Inbound, Outbound>> = channel.eventLoop.makeCompletedFuture {
+                    guard acceptGate.beginDelivery() else {
+                        throw ServerServiceErrors.listenerClosed
                     }
-                    if let channelHandlers = self?.serviceListenerDelegate?.retrieveChannelHandlers(), !channelHandlers.isEmpty {
-                        try channel.pipeline.syncOperations.addHandlers(channelHandlers)
+                    do {
+                        if let sslHandler = self?.serviceListenerDelegate?.retrieveSSLHandler() {
+                            try channel.pipeline.syncOperations.addHandler(sslHandler)
+                        }
+                        if let channelHandlers = self?.serviceListenerDelegate?.retrieveChannelHandlers(), !channelHandlers.isEmpty {
+                            try channel.pipeline.syncOperations.addHandlers(channelHandlers)
+                        }
+                        return try CancellableFuture.wrap(channel)
+                    } catch {
+                        acceptGate.endDelivery()
+                        throw error
                     }
-                    return try CancellableFuture.wrap(channel)
                 }
+                wrapped.whenFailure { _ in channel.close(promise: nil) }
+                return wrapped
             })
     }
     
@@ -308,13 +375,18 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
         serverChannel: NIOAsyncChannel<NIOAsyncChannel<Inbound, Outbound>, Never>
     ) async throws {
         try await runAcceptLoop(serverChannel) { [self] inbound, stopped in
+            // Once this loop is gone nothing can own a delivered child; reject late ones.
+            defer { acceptGate.close() }
             // Use optimized task group for better concurrency
             try await withThrowingDiscardingTaskGroup { group in
                 for try await childChannel in inbound {
+                    acceptGate.endDelivery()
                     // Check connection limits before accepting
                     guard await canAcceptConnection() else {
                         logger.log(level: .warning, message: "Connection limit reached, rejecting new connection")
-                        try? await childChannel.executeThenClose { _, _ in }
+                        // Finished and closed off the accept loop so a rejected peer
+                        // cannot head-of-line block the next accept.
+                        CancellableFuture.discard(childChannel)
                         continue
                     }
                     
@@ -345,6 +417,9 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
     ///
     /// `stopped` is set when the surrounding task was cancelled, so `body` can cancel the
     /// connections it started once the loop ends.
+    ///
+    /// The socket is closed through `closeListeningSocket`, which first waits for children
+    /// that are between the child initializer and `inbound` (see `AcceptGate`).
     private func runAcceptLoop<Element: Sendable>(
         _ serverChannel: NIOAsyncChannel<Element, Never>,
         _ body: @escaping @Sendable (NIOAsyncChannelInboundStream<Element>, CancelFlag) async throws -> Void
@@ -357,15 +432,28 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                 try await serverChannel.executeThenClose { inbound in
                     try await body(inbound, stopped)
                 }
-            } onGracefulShutdown: {
-                serverChannel.channel.close(promise: nil)
+            } onGracefulShutdown: { [self] in
+                closeListeningSocket(serverChannel.channel)
             }
         }
         try await withTaskCancellationHandler {
             try await acceptTask.value
-        } onCancel: {
+        } onCancel: { [self] in
             stopped.cancel()
-            serverChannel.channel.close(promise: nil)
+            closeListeningSocket(serverChannel.channel)
+        }
+    }
+
+    /// Closes the listening socket once no accepted child is still in flight to the accept
+    /// loop. Synchronous callers (shutdown handlers) get the drain on a detached task.
+    nonisolated private func closeListeningSocket(_ channel: Channel) {
+        let gate = acceptGate
+        let logger = logger
+        Task {
+            if await !gate.closeAndDrain() {
+                logger.log(level: .warning, message: "Closing listener with children still in flight")
+            }
+            channel.close(promise: nil)
         }
     }
     
@@ -475,7 +563,12 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
 
         // ServiceGroup / executeThenClose may already have closed the bind.
         // Awaiting close() here throws `alreadyClosed` on POSIX NIO.
-        listeningChannel?.close(promise: nil)
+        if let listeningChannel {
+            if await !acceptGate.closeAndDrain() {
+                logger.log(level: .warning, message: "Closing listener with children still in flight")
+            }
+            listeningChannel.close(promise: nil)
+        }
         listeningChannel = nil
         
         logger.log(level: .info, message: "Server service shutdown complete")

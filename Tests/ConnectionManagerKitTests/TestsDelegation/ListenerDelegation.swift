@@ -71,6 +71,8 @@ final class ListenerDelegation: ListenerDelegate {
     ) async {
         serverChannelAny = channel
         boundPort = channel.channel.localAddress?.port
+        // Test-only shortcut: closes the bind before `ServerService` runs its own
+        // `executeThenClose`, bypassing the accept gate. Only safe with no clients.
         if shouldShutdown {
             try? await channel.executeThenClose({ _, _ in })
         }

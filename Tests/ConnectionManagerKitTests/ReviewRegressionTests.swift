@@ -41,7 +41,7 @@ func waitUntil(
 /// Runs `body` and returns `true` if it completed before `timeout`.
 ///
 /// Uses an unstructured task so a body that is not cancellation-responsive
-/// (e.g. one blocked in `EventLoopFuture.get()`) cannot hang the test; it is
+/// (e.g. one blocked on a never-completing future) cannot hang the test; it is
 /// abandoned instead.
 func completes(within timeout: Duration, _ body: @escaping @Sendable () async -> Void) async -> Bool {
     let done = NIOLockedValueBox(false)
@@ -246,13 +246,11 @@ struct ReviewRegressionTests {
         let (port, serverTask) = try await startWSListener(listener, delegate: serverDelegate, listenerDelegate: listenerDelegate)
 
         // A TCP client that connects and immediately goes away without upgrading.
-        let raw = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
-            .connect(host: "127.0.0.1", port: port).get()
+        let raw = try await connectRaw(host: "127.0.0.1", port: port)
         try await raw.close()
 
         // A second raw client sends non-HTTP garbage.
-        let garbage = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
-            .connect(host: "127.0.0.1", port: port).get()
+        let garbage = try await connectRaw(host: "127.0.0.1", port: port)
         var junk = ByteBuffer()
         junk.writeString("\u{01}\u{02}this is not http\r\n\r\n")
         try? await garbage.writeAndFlush(junk)
@@ -280,13 +278,12 @@ struct ReviewRegressionTests {
         let serverDelegate = RecordingConnectionDelegate<WebSocketFrame, WebSocketFrame>(listener: listener)
         let (port, serverTask) = try await startWSListener(listener, delegate: serverDelegate, listenerDelegate: listenerDelegate)
 
-        let http = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
-            .connect(host: "127.0.0.1", port: port).get()
+        let http = try await connectRaw(host: "127.0.0.1", port: port)
         var request = ByteBuffer()
         request.writeString("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
         try await http.writeAndFlush(request)
         // The server should close the non-upgraded connection on its own.
-        #expect(await completes(within: .seconds(5)) { try? await http.closeFuture.get() },
+        #expect(await completes(within: .seconds(5)) { try? await http.closeFuture.getAbandoningOnCancel() },
                 "server must close a plain HTTP connection to a WebSocket listener")
 
         let manager = ConnectionManager<WebSocketFrame, WebSocketFrame>()
@@ -313,8 +310,7 @@ struct ReviewRegressionTests {
         let serverDelegate = RecordingConnectionDelegate(listener: listener, serverContextDelegate: serverContext)
         let (port, serverTask) = try await startTCPListener(listener, delegate: serverDelegate, listenerDelegate: listenerDelegate)
 
-        let client = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
-            .connect(host: "127.0.0.1", port: port).get()
+        let client = try await connectRaw(host: "127.0.0.1", port: port)
         #expect(await waitUntil { await listener.getMetrics().activeConnections == 1 })
 
         var poison = ByteBuffer()
@@ -328,12 +324,11 @@ struct ReviewRegressionTests {
         #expect(await waitUntil { await listener.getMetrics().activeConnections == 0 },
                 "errored connection must release its concurrency slot")
         #expect(await waitUntil { await listener.getMetrics().totalConnectionsClosed == 1 })
-        #expect(await completes(within: .seconds(5)) { try? await client.closeFuture.get() },
+        #expect(await completes(within: .seconds(5)) { try? await client.closeFuture.getAbandoningOnCancel() },
                 "server must close the errored connection")
 
         // The freed slot must be usable by a new client.
-        let second = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
-            .connect(host: "127.0.0.1", port: port).get()
+        let second = try await connectRaw(host: "127.0.0.1", port: port)
         #expect(await waitUntil { serverDelegate.initializedIDs.count == 2 }, "second client must be accepted after the first errored out")
         try? await second.close()
 
@@ -372,8 +367,7 @@ struct ReviewRegressionTests {
         let (port, serverTask) = try await startTCPListener(
             listener, delegate: nil, listenerDelegate: listenerDelegate, host: nil)
 
-        let client = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
-            .connect(host: "127.0.0.1", port: port).get()
+        let client = try await connectRaw(host: "127.0.0.1", port: port)
         #expect(client.isActive)
         try await client.close()
 
@@ -582,11 +576,9 @@ struct ReviewRegressionTests {
             try await task.value
         }
 
-        let server = try await ServerBootstrap(group: group)
-            .bind(host: "127.0.0.1", port: 0).get()
+        let server = try await bindRaw(host: "127.0.0.1", port: 0, group: group)
         let port = try #require(server.localAddress?.port)
-        let client = try await ClientBootstrap(group: group)
-            .connect(host: "127.0.0.1", port: port).get()
+        let client = try await connectRaw(host: "127.0.0.1", port: port, group: group)
         promise.succeed(client)
 
         #expect(await waitUntil(timeout: .seconds(2)) { !client.isActive })
@@ -598,8 +590,7 @@ struct ReviewRegressionTests {
 
     /// Binds and immediately closes a listener so the port is known to be closed.
     private func reserveClosedPort() async throws -> Int {
-        let server = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
-            .bind(host: "127.0.0.1", port: 0).get()
+        let server = try await bindRaw(host: "127.0.0.1", port: 0)
         let port = try #require(server.localAddress?.port)
         try await server.close()
         return port
