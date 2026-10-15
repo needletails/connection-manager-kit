@@ -50,12 +50,18 @@ public enum NIOEvent: @unchecked Sendable {
 
 ## Basic Network Event Handling
 
+> Important: `ConnectionManager` invokes `handleNetworkEvents` on a detached task, so
+> `connect(to:)` is not blocked by inline `for await` iteration. When a connection is
+> replaced, a **new** stream is delivered; cancel any prior consuming task so you do not
+> miss events. Monitor streams finish when the channel closes.
+
 ### Setting Up Event Monitoring
 
 ```swift
 class MyConnectionDelegate: ConnectionDelegate {
     func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>, id: String) async {
-        for await event in stream {
+        Task {
+            for await event in stream {
             switch event {
             case .viabilityChanged(let update):
                 print("Connection \(id) viability: \(update.isViable)")
@@ -77,6 +83,7 @@ class MyConnectionDelegate: ConnectionDelegate {
                 
             case .bindToNWEndpoint(let endpoint):
                 print("Binding to endpoint for \(id)")
+            }
             }
         }
     }
@@ -445,22 +452,18 @@ class MyConnectionDelegate: ConnectionDelegate {
 
 ## Best Practices
 
-### 1. Handle Events Asynchronously
+### 1. Replace Stale Event Consumers on Reconnect
 
 ```swift
-// Good: Handle events asynchronously
-func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>, id: String) async {
-    for await event in stream {
-        await processEvent(event, id: id)
-    }
-}
+private let eventsTask = NIOLockedValueBox<Task<Void, Never>?>(nil)
 
-// Avoid: Blocking event processing
 func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>, id: String) async {
-    for await event in stream {
-        // Don't block here
-        Thread.sleep(forTimeInterval: 1.0) // ❌ Bad
+    let task = Task {
+        for await event in stream {
+            await processEvent(event, id: id)
+        }
     }
+    eventsTask.withLockedValue { $0?.cancel(); $0 = task }
 }
 ```
 

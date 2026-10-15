@@ -172,7 +172,7 @@ final class ConnectionManagerTests: XCTestCase {
 ### Example Documentation
 
 ```swift
-/// Manages network connections with automatic reconnection support.
+/// Manages network connections with retried connection establishment and caching.
 ///
 /// The `ConnectionManager` provides a high-level interface for establishing
 /// and maintaining network connections with built-in retry logic and

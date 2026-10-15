@@ -250,12 +250,16 @@ private final class WSConnectionDelegate: ConnectionDelegate, @unchecked Sendabl
     func initializedChildChannel<Outbound, Inbound>(_ context: ConnectionManagerKit.ChannelContext<Inbound, Outbound>) async where Outbound : Sendable, Inbound : Sendable {}
 }
 
-/// A high-level WebSocket client with automatic reconnection and main-actor event delivery.
+/// A high-level WebSocket client with retried connection establishment and main-actor event delivery.
 ///
 /// - Thread-safety: `WebSocketClient` is an actor. All state, such as connection maps,
 ///   is protected by actor isolation.
 /// - Events: Inbound frames and lifecycle events are forwarded to the `SocketReceiver`
 ///   on the main actor.
+/// - Lifecycle: `maxReconnectionAttempts` / `retryStrategy` retry the *initial* connect. Once a
+///   route is connected and later closes (server Close frame, heartbeat timeout, network loss) the
+///   route is removed and `SocketReceiver.eventStream` publishes `.channelInactive`; the client does
+///   not reconnect on its own. Observe that event and call `connect` again to re-establish.
 /// - Shutdown: `shutDown()` gracefully closes connections and finishes streams to
 ///   prevent leaks.
 public actor WebSocketClient {
@@ -564,6 +568,16 @@ public actor WebSocketClient {
                 self.socketReceiver.setInboundMessage(.continuation)
             }
         case .connectionClose:
+            // RFC 6455 §5.5.1: a Close must be answered with a Close, after which the
+            // TCP connection is dropped. Echo the status code (first two bytes) and
+            // close the channel; the run-finish that follows tears the route down
+            // through `routeDidClose`. Without this the socket lingered until the
+            // server gave up on the close handshake.
+            if let bucket = connections[route] {
+                let status = frame.data.getSlice(at: frame.data.readerIndex, length: min(frame.data.readableBytes, 2)) ?? ByteBuffer()
+                await bucket.contextDelegate.closeChannel(
+                    afterSending: WebSocketFrame(fin: true, opcode: .connectionClose, maskKey: maskKey, data: status))
+            }
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.socketReceiver.setInboundMessage(.connectionClose)
@@ -583,6 +597,8 @@ actor RouteContextDelegate: ChannelContextDelegate {
     let route: String
     weak var socket: WebSocketClient?
     var writer: NIOAsyncChannelOutboundWriter<WebSocketFrame>?
+    /// The live channel, kept so a server-initiated Close can drop the TCP connection.
+    private var channel: Channel?
     nonisolated private let activeTask = NIOLockedValueBox<Task<Void, Never>?>(nil)
     nonisolated private let inactiveTask = NIOLockedValueBox<Task<Void, Never>?>(nil)
     
@@ -595,7 +611,20 @@ actor RouteContextDelegate: ChannelContextDelegate {
         guard Outbound.self == WebSocketFrame.self else { return }
         let writer = context.writer as! NIOAsyncChannelOutboundWriter<WebSocketFrame>
         self.writer = writer
+        self.channel = context.channel.channel
         await socket?.writerDidBecomeAvailable(for: route)
+    }
+
+    /// Writes `frame` and closes once that write has completed, so the peer sees
+    /// the frame before the FIN. Closing right after handing the frame to the
+    /// async writer raced the in-flight send on Network.framework.
+    /// `ChildChannelService.run()` observes the resulting inbound end and
+    /// finishes the route.
+    func closeChannel(afterSending frame: WebSocketFrame) {
+        guard let channel else { return }
+        channel.writeAndFlush(frame).whenComplete { _ in
+            channel.close(promise: nil)
+        }
     }
     
     func deliverInboundBuffer<Inbound, Outbound>(context: StreamContext<Inbound, Outbound>) async where Inbound : Sendable, Outbound : Sendable {
@@ -637,6 +666,7 @@ actor RouteContextDelegate: ChannelContextDelegate {
 
     func invalidate() {
         writer = nil
+        channel = nil
         for box in [activeTask, inactiveTask] {
             let task = box.withLockedValue { stored in
                 defer { stored = nil }

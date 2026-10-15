@@ -72,33 +72,6 @@ public struct CacheConfiguration: Sendable {
     }
 }
 
-/// Legacy pooling configuration retained for source compatibility.
-///
-/// ConnectionManagerKit provides a keyed cache and does not consume this configuration.
-@available(*, deprecated, message: "ConnectionManagerKit provides a keyed connection cache, not a multi-checkout connection pool.")
-public struct ConnectionPoolConfiguration: Sendable {
-    /// Legacy minimum connection setting.
-    public let minConnections: Int
-    /// Legacy maximum connection setting.
-    public let maxConnections: Int
-    /// Legacy acquisition timeout setting.
-    public let acquireTimeout: TimeAmount
-    /// Legacy idle timeout setting.
-    public let maxIdleTime: TimeAmount
-    
-    public init(
-        minConnections: Int = 0,
-        maxConnections: Int = 10,
-        acquireTimeout: TimeAmount = .seconds(30),
-        maxIdleTime: TimeAmount = .seconds(300)
-    ) {
-        self.minConnections = minConnections
-        self.maxConnections = maxConnections
-        self.acquireTimeout = acquireTimeout
-        self.maxIdleTime = maxIdleTime
-    }
-}
-
 /// A thread-safe cache for managing network connections.
 ///
 /// `ConnectionCache` provides efficient storage and retrieval of active network connections
@@ -154,6 +127,10 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
     private var connectionOrderHead = 0
     private var orderGeneration: UInt64 = 0
     private var currentGenerationByKey: [String: UInt64] = [:]
+    /// Entries at or beyond `connectionOrderHead` whose generation is no longer
+    /// current (superseded by a newer touch or removed). Drives compaction so
+    /// churn below capacity cannot grow the log without bound.
+    private var staleOrderEntries = 0
     
     /// Timestamps for TTL tracking (only used when TTL is enabled).
     private var timestamps: [String: TimeAmount] = [:]
@@ -184,6 +161,12 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
     /// - Returns: The total number of connections in the cache.
     var count: Int {
         return connections.count
+    }
+
+    /// Size of the access-order log including stale entries. Internal visibility
+    /// exists so tests can assert the log stays bounded under churn.
+    var orderEntryCountForTesting: Int {
+        connectionOrder.count
     }
     
     /// Creates a new connection cache instance.
@@ -439,6 +422,7 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
         connections.removeAll()
         connectionOrder.removeAll()
         connectionOrderHead = 0
+        staleOrderEntries = 0
         currentGenerationByKey.removeAll()
         timestamps.removeAll()
         
@@ -533,9 +517,14 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
     
     /// Adds a key to the LRU order.
     private func addToLRU(_ key: String) {
+        if currentGenerationByKey[key] != nil {
+            // The previous entry for this key is now stale.
+            staleOrderEntries += 1
+        }
         orderGeneration &+= 1
         currentGenerationByKey[key] = orderGeneration
         connectionOrder.append(OrderEntry(key: key, generation: orderGeneration))
+        compactConnectionOrderIfNeeded()
     }
     
     /// Updates a key's position in the LRU order (moves to end).
@@ -546,7 +535,10 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
     
     /// Removes a key from the LRU order.
     private func removeFromLRU(_ key: String) {
-        currentGenerationByKey[key] = nil
+        if currentGenerationByKey.removeValue(forKey: key) != nil {
+            staleOrderEntries += 1
+        }
+        compactConnectionOrderIfNeeded()
     }
     
     /// Evicts the least recently used connection.
@@ -556,6 +548,8 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
             connectionOrderHead += 1
 
             guard currentGenerationByKey[entry.key] == entry.generation else {
+                // Skipped a stale entry; it is now behind the head.
+                staleOrderEntries = max(0, staleOrderEntries - 1)
                 continue
             }
 
@@ -582,15 +576,21 @@ actor ConnectionCache<Inbound: Sendable, Outbound: Sendable> {
         return nil
     }
 
+    /// Rebuilds the order log once at least half of it is dead weight: entries
+    /// behind the eviction head, or stale entries ahead of it. Live entries keep
+    /// their relative order.
     private func compactConnectionOrderIfNeeded() {
         guard
-            connectionOrderHead >= 256,
-            connectionOrderHead * 2 >= connectionOrder.count
+            connectionOrder.count >= 256,
+            (connectionOrderHead + staleOrderEntries) * 2 >= connectionOrder.count
         else {
             return
         }
-        connectionOrder.removeFirst(connectionOrderHead)
+        connectionOrder = connectionOrder[connectionOrderHead...].filter { entry in
+            currentGenerationByKey[entry.key] == entry.generation
+        }
         connectionOrderHead = 0
+        staleOrderEntries = 0
     }
 }
 
@@ -600,10 +600,5 @@ extension TimeAmount {
     /// Monotonic uptime used for elapsed-time calculations.
     static var now: TimeAmount {
         .nanoseconds(Int64(clamping: NIODeadline.now().uptimeNanoseconds))
-    }
-    
-    /// Creates a TimeAmount from milliseconds.
-    static func milliseconds(_ value: Int) -> TimeAmount {
-        return .nanoseconds(Int64(value) * 1_000_000)
     }
 }

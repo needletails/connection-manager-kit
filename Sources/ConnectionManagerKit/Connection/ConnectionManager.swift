@@ -12,7 +12,6 @@
 //
 //  This file is part of the ConnectionManagerKit Project
 
-import Atomics
 import Foundation
 import NIOConcurrencyHelpers
 import NIOCore
@@ -129,9 +128,6 @@ public struct TLSPreKeyedConfiguration: Sendable {
 /// ```
 public protocol ConnectionManagerDelegate: AnyObject, Sendable {
     
-    associatedtype Inbound: Sendable
-    associatedtype Outbound: Sendable
-    
     /// Retrieves an array of custom channel handlers required by the consumer.
     ///
     /// This method allows the delegate to specify any additional handlers that should be added to the
@@ -139,23 +135,7 @@ public protocol ConnectionManagerDelegate: AnyObject, Sendable {
     ///
     /// - Returns: An array of `ChannelHandler` instances to be added to the connection pipeline.
     func retrieveChannelHandlers() -> [ChannelHandler]
-    
-    /// Delivers the `NIOAsyncChannel` to the delegate for further configuration.
-    ///
-    /// This method provides access to the underlying `NIOChannel`, allowing the delegate to set up
-    /// connection-specific delegates. It is essential to call this method in order to properly configure
-    /// the connection manager by invoking the `setDelegates(connectionDelegate:contextDelegate:cacheKey:)`
-    /// method with the conforming instances of `ConnectionDelegate` and `ChannelContextDelegate`.
-    ///
-    /// - Parameters:
-    ///   - channel: The `NIOAsyncChannel<Inbound, Outbound>` instance that represents the connection.
-    ///   - manager: The `ConnectionManager<Inbound, Outbound>` instance responsible for managing the connection.
-    ///   - cacheKey: A unique identifier for the connection in the cache.
-    ///
-    /// - Note: This method is asynchronous and should be awaited.
-    @available(*, deprecated, message: "This method is deprecated and will be removed in a future version. Use channelCreated(_:cacheKey:) instead.")
-    func deliverChannel(_ channel: NIOAsyncChannel<Inbound, Outbound>, manager: ConnectionManager<Inbound, Outbound>, cacheKey: String) async
-    
+
     /// Called when a channel is created.
     ///
     /// This method is called when a channel is created. It is used to notify the delegate that a channel has been created.
@@ -164,10 +144,6 @@ public protocol ConnectionManagerDelegate: AnyObject, Sendable {
     ///   - eventLoop: The event loop that the channel is created on.
     ///   - cacheKey: A unique identifier for the connection in the cache.
     func channelCreated(_ eventLoop: EventLoop, cacheKey: String) async
-}
-
-extension ConnectionManagerDelegate {
-    public func deliverChannel(_ channel: NIOAsyncChannel<Inbound, Outbound>, manager: ConnectionManager<Inbound, Outbound>, cacheKey: String) async {}
 }
 
 /// Configuration for connection retry strategies.
@@ -182,16 +158,24 @@ public enum RetryStrategy: Sendable {
 
 /// A manager responsible for handling network connections, including establishing, caching, and monitoring connections.
 ///
-/// `ConnectionManager` provides a high-level interface for managing multiple network connections with automatic
-/// reconnection, connection caching, and network event monitoring. It supports both TLS and non-TLS connections
-/// and works across different platforms (Apple platforms using Network framework, others using NIO).
+/// `ConnectionManager` provides a high-level interface for managing multiple network connections with
+/// retried connection establishment, connection caching, and network event monitoring. It supports both
+/// TLS and non-TLS connections and works across different platforms (Apple platforms using Network
+/// framework, others using NIO).
 ///
 /// ## Key Features
 /// - **Connection Caching**: Automatically caches connections for reuse
-/// - **Automatic Reconnection**: Handles connection failures with configurable retry logic
+/// - **Connect Retries**: Retries the initial connection to each server with a configurable `RetryStrategy`
 /// - **TLS Support**: Built-in support for TLS connections with customizable configurations
 /// - **Network Monitoring**: Monitors network events and connection state changes
 /// - **Cross-Platform**: Works on iOS, macOS, tvOS, watchOS, and Linux
+///
+/// ## Lifecycle of an established connection
+/// `maxReconnectionAttempts` and `retryStrategy` apply to establishing a connection only. Once a
+/// connection is up and later closes (peer close, network loss, error), the manager evicts it from
+/// the cache and notifies `ChannelContextDelegate.didShutdownChildChannel()`; it does not reconnect
+/// on its own. Reconnect by calling `connect(to:)` again from that event (or from
+/// `channelInactive`). There are no timers involved: the close event is the trigger.
 ///
 /// ## Usage Example
 /// ```swift
@@ -244,7 +228,14 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     private var cacheMetricsCallbackInstalled = false
     /// Optional WebSocket configuration applied to all connections created by this manager.
     public nonisolated(unsafe) var webSocketOptions: WebSocketOptions?
-    private nonisolated(unsafe) var enabledWebsocket: Bool = false
+
+    /// How a given `connect*` call should establish its channels. Passed per call
+    /// rather than stored on the manager so a `connectWebSocket` never changes
+    /// the behavior of a later plain `connect`.
+    enum Transport: Sendable {
+        case tcp
+        case webSocket
+    }
     
     /// The logger instance for this connection manager.
     private let logger: NeedleTailLogger
@@ -371,11 +362,9 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         """
     }
     
-    /// Sets the delegate with proper type safety.
-    ///
-    /// This method ensures that the delegate has matching generic types.
-    /// - Parameter delegate: The delegate to set, must have matching Inbound and Outbound types.
-    public func setDelegate<D: ConnectionManagerDelegate>(_ delegate: D) where D.Inbound == Inbound, D.Outbound == Outbound {
+    /// Sets the delegate that supplies channel handlers and receives channel-created events.
+    /// - Parameter delegate: The delegate to set.
+    public func setDelegate(_ delegate: any ConnectionManagerDelegate) {
         self.delegate = delegate
     }
     
@@ -439,14 +428,18 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     /// This method provides advanced configuration options while maintaining backward compatibility.
     /// Use this method when you need custom retry strategies or other advanced features.
     ///
+    /// Servers are connected sequentially. If a server exhausts its attempts the error is thrown
+    /// immediately and the remaining servers are not attempted; use `connectParallel` to attempt
+    /// every server regardless.
+    ///
     /// - Parameters:
     ///   - servers: An array of `ServerLocation` instances to connect to.
-    ///   - maxReconnectionAttempts: The maximum number of reconnection attempts for each server. Default is 6.
+    ///   - maxReconnectionAttempts: The maximum number of attempts for the initial connection to each server. Default is 6.
     ///   - timeout: The timeout duration for each connection attempt. Default is 10 seconds.
     ///   - tlsPreKeyed: Optional pre-configured TLS settings to use for all connections.
-    ///   - retryStrategy: The retry strategy to use for failed connections.
+    ///   - retryStrategy: The retry strategy to use between failed attempts.
     ///
-    /// - Throws: An error if all connection attempts fail after the maximum number of retries.
+    /// - Throws: The error from the first server that could not be connected after `maxReconnectionAttempts`.
     ///
     /// ## Example
     /// ```swift
@@ -469,7 +462,8 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         tlsPreKeyed: TLSPreKeyedConfiguration? = nil,
         retryStrategy: RetryStrategy
     ) async throws {
-        for await server in servers.async {
+        _shouldReconnect = true
+        for server in servers {
             try await attemptConnection(
                 to: server,
                 currentAttempt: 0,
@@ -484,6 +478,13 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     ///
     /// This method allows you to update the delegates for an existing cached connection.
     /// If no connection exists for the given cache key, this method does nothing.
+    ///
+    /// - Important: The monitor streams (`handleError`, `handleNetworkEvents`, `channelActive`,
+    ///   `channelInactive`) are handed to the delegates exactly once, immediately after
+    ///   `ConnectionManagerDelegate.channelCreated(_:cacheKey:)` returns. Call this method from
+    ///   `channelCreated` (or pass the delegates in the `ServerLocation`) so they are in place at
+    ///   that moment; delegates set later still receive inbound data and writers but never those
+    ///   streams.
     ///
     /// - Parameters:
     ///   - connectionDelegate: The delegate responsible for handling connection events.
@@ -518,17 +519,18 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     
     /// Connects to a list of server locations with specified parameters.
     ///
-    /// This method attempts to establish connections to all provided servers. It will retry failed
-    /// connections according to the `maxReconnectionAttempts` parameter and monitor network events
-    /// for all established connections.
+    /// This method attempts to establish connections to all provided servers, sequentially. It
+    /// retries each initial connection according to `maxReconnectionAttempts` (fixed 5 second
+    /// delay) and monitors network events for all established connections. If a server exhausts
+    /// its attempts the error is thrown immediately and the remaining servers are not attempted.
     ///
     /// - Parameters:
     ///   - servers: An array of `ServerLocation` instances to connect to.
-    ///   - maxReconnectionAttempts: The maximum number of reconnection attempts for each server. Default is 6.
+    ///   - maxReconnectionAttempts: The maximum number of attempts for the initial connection to each server. Default is 6.
     ///   - timeout: The timeout duration for each connection attempt. Default is 10 seconds.
     ///   - tlsPreKeyed: Optional pre-configured TLS settings to use for all connections.
     ///
-    /// - Throws: An error if all connection attempts fail after the maximum number of retries.
+    /// - Throws: The error from the first server that could not be connected after `maxReconnectionAttempts`.
     ///
     /// ## Example
     /// ```swift
@@ -551,7 +553,8 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     ) async throws {
         // Use default retry strategy for backward compatibility
         let retryStrategy: RetryStrategy = .fixed(delay: .seconds(5))
-        for await server in servers.async {
+        _shouldReconnect = true
+        for server in servers {
             try await attemptConnection(
                 to: server,
                 currentAttempt: 0,
@@ -582,7 +585,8 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         maxAttempts: Int,
         timeout: TimeAmount,
         tlsPreKeyed: TLSPreKeyedConfiguration? = nil,
-        retryStrategy: RetryStrategy
+        retryStrategy: RetryStrategy,
+        transport: Transport = .tcp
     ) async throws {
         await ensureCacheMetricsCallback()
         guard !isShuttingDown else { throw CancellationError() }
@@ -598,21 +602,27 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                 server: server,
                 group: self.group,
                 timeout: timeout,
-                tlsPreKeyed: tlsPreKeyed)
+                tlsPreKeyed: tlsPreKeyed,
+                transport: transport)
 
+            // A wrapped channel nobody will run must be finished through
+            // `executeThenClose`, not just closed: dropping it after a bare close
+            // relies on NIO finishing the writer sink before the close promise fires.
             guard !isShuttingDown else {
-                try? await childChannel.channel.close()
+                CancellableFuture.discard(childChannel)
                 throw CancellationError()
             }
-            
+
             let connectionTime = TimeAmount.now - startTime
             let monitor: NetworkEventMonitor
             do {
-                monitor = try await childChannel.channel.pipeline.handler(
-                    type: NetworkEventMonitor.self
-                ).get()
+                monitor = try await CancellableFuture.resolve(
+                    childChannel.channel.pipeline.handler(type: NetworkEventMonitor.self)
+                ) {
+                    CancellableFuture.discard(childChannel)
+                }
             } catch {
-                try? await childChannel.channel.close()
+                CancellableFuture.discard(childChannel)
                 throw error
             }
             
@@ -659,7 +669,8 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                     maxAttempts: maxAttempts,
                     timeout: timeout,
                     tlsPreKeyed: tlsPreKeyed,
-                    retryStrategy: retryStrategy)
+                    retryStrategy: retryStrategy,
+                    transport: transport)
             } else {
                 _shouldReconnect = false
                 // If max attempts reached, rethrow the error
@@ -708,7 +719,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     /// Errors that can occur within the `ConnectionManager`.
     enum Errors: Error {
         /// Indicates that TLS configuration is required but not provided.
-        case tlsNotConfigured, websocketUpgradeFailed
+        case tlsNotConfigured, websocketUpgradeFailed, connectionSetupFailed
     }
     
     /// Creates a connection to the specified server.
@@ -728,8 +739,13 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         server: ServerLocation,
         group: EventLoopGroup,
         timeout: TimeAmount,
-        tlsPreKeyed: TLSPreKeyedConfiguration? = nil
+        tlsPreKeyed: TLSPreKeyedConfiguration? = nil,
+        transport: Transport
     ) async throws -> NIOAsyncChannel<Inbound, Outbound> {
+        // Snapshot on the actor. `upgradeSocket` runs on the event loop and must
+        // not read or write the `nonisolated(unsafe)` property from there.
+        let webSocketOptions = self.webSocketOptions ?? WebSocketOptions()
+        let useWebSocket = transport == .webSocket
         
 #if !canImport(Network)
         @Sendable func addClientTLSHandlerIfNeeded(
@@ -756,6 +772,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
 
         func socketChannelCreator() async throws -> NIOAsyncChannel<Inbound, Outbound> {
             var client = ClientBootstrap(group: group)
+                .connectTimeout(timeout)
             // Adopter-supplied TCP options (e.g. dead-peer detection). Applied
             // to the shared bootstrap so both the websocket-upgrade and plain
             // TCP branches get them.
@@ -772,27 +789,23 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                 logger.log(level: .info, message: "TLS not enabled for connection to \(server.host):\(server.port)")
             }
             
-            if enabledWebsocket {
-                let upgradeResult: EventLoopFuture<UpgradeResult> = try await client.connect(
-                    host: server.host,
-                    port: server.port) { channel in
-                        upgradeSocket(channel, server: server)
-                    }
-                switch try await upgradeResult.get() {
-                case .websocket(let websocketChannel):
-                    return websocketChannel as! NIOAsyncChannel<Inbound, Outbound>
-                case .notUpgraded:
-                    throw Errors.websocketUpgradeFailed
-                }
+            if useWebSocket {
+                let upgrades = ChannelProducts<EventLoopFuture<UpgradeResult>>(discard: discardUpgrade)
+                // The async `connect` overload waits with `EventLoopFuture.get()`, which ignores
+                // cancellation. The future-returning connect is resolved below instead.
+                let connected = client.channelInitializer { channel in
+                    upgradeSocket(channel, server: server).map { upgrades.store($0, on: channel) }
+                }.connect(host: server.host, port: server.port)
+                return try await finishWebSocket(connected, upgrades: upgrades)
             } else {
-                return try await client
-                    .connectTimeout(timeout)
+                let produced = ChannelProducts<NIOAsyncChannel<Inbound, Outbound>>(discard: CancellableFuture.discard)
+                let connected = client
                     .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
-                    .connect(
-                        host: server.host,
-                        port: server.port) { channel in
-                            return createHandlers(channel, server: server)
-                        }
+                    .channelInitializer { channel in
+                        createHandlers(channel, server: server).map { produced.store($0, on: channel) }
+                    }
+                    .connect(host: server.host, port: server.port)
+                return try await finish(connected, produced: produced)
             }
         }
 #endif
@@ -826,28 +839,89 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
             .connectTimeout(timeout)
             .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
         
-        if enabledWebsocket {
-            let upgradeResult: EventLoopFuture<UpgradeResult> = try await connection.connect(
-                host: server.host,
-                port: server.port) { channel in
-                    upgradeSocket(channel, server: server)
-                }
-            switch try await upgradeResult.get() {
-            case .websocket(let websocketChannel):
-                return websocketChannel as! NIOAsyncChannel<Inbound, Outbound>
-            case .notUpgraded:
-                throw Errors.websocketUpgradeFailed
-            }
+        if useWebSocket {
+            let upgrades = ChannelProducts<EventLoopFuture<UpgradeResult>>(discard: discardUpgrade)
+            // The async `connect` overload waits with `EventLoopFuture.get()`, which ignores
+            // cancellation. The future-returning connect is resolved below instead.
+            let connected = connection.channelInitializer { channel in
+                upgradeSocket(channel, server: server).map { upgrades.store($0, on: channel) }
+            }.connect(host: server.host, port: server.port)
+            return try await finishWebSocket(connected, upgrades: upgrades)
         } else {
-            return try await connection.connect(
-                host: server.host,
-                port: server.port) { channel in
-                    return createHandlers(channel, server: server)
-                }
+            let produced = ChannelProducts<NIOAsyncChannel<Inbound, Outbound>>(discard: CancellableFuture.discard)
+            let connected = connection.channelInitializer { channel in
+                createHandlers(channel, server: server).map { produced.store($0, on: channel) }
+            }.connect(host: server.host, port: server.port)
+            return try await finish(connected, produced: produced)
         }
 #else
         return try await socketChannelCreator()
 #endif
+
+        @Sendable func finish(
+            _ connected: EventLoopFuture<Channel>,
+            produced: ChannelProducts<NIOAsyncChannel<Inbound, Outbound>>
+        ) async throws -> NIOAsyncChannel<Inbound, Outbound> {
+            let channel = try await CancellableFuture.resolveChannel(connected)
+            guard let asyncChannel = produced.take(from: channel) else {
+                CancellableFuture.discard(channel)
+                throw Errors.connectionSetupFailed
+            }
+            return asyncChannel
+        }
+
+        @Sendable func finishWebSocket(
+            _ connected: EventLoopFuture<Channel>,
+            upgrades: ChannelProducts<EventLoopFuture<UpgradeResult>>
+        ) async throws -> NIOAsyncChannel<Inbound, Outbound> {
+            let channel = try await CancellableFuture.resolveChannel(connected)
+            guard let upgradeResult = upgrades.take(from: channel) else {
+                CancellableFuture.discard(channel)
+                throw Errors.websocketUpgradeFailed
+            }
+            return try await resolveUpgrade(upgradeResult, channel: channel)
+        }
+
+        /// Drops an upgrade nobody will consume; a completed upgrade owns a wrapped channel
+        /// whose writer must be finished rather than released.
+        @Sendable func discardUpgrade(_ upgrade: EventLoopFuture<UpgradeResult>) {
+            upgrade.whenSuccess { result in
+                if case .websocket(let websocketChannel) = result {
+                    CancellableFuture.discard(websocketChannel)
+                }
+            }
+        }
+        
+        /// Resolves the upgrade future into a typed channel. `connectWebSocket` is
+        /// constrained to `WebSocketFrame` managers, so the cast only fails if the
+        /// generic path is misused; it throws rather than trapping.
+        @Sendable func resolveUpgrade(
+            _ upgradeResult: EventLoopFuture<UpgradeResult>,
+            channel: Channel
+        ) async throws -> NIOAsyncChannel<Inbound, Outbound> {
+            let result: UpgradeResult
+            do {
+                result = try await CancellableFuture.resolve(upgradeResult) {
+                    // The upgrade may still complete; finish whatever it produces.
+                    discardUpgrade(upgradeResult)
+                    CancellableFuture.discard(channel)
+                }
+            } catch {
+                CancellableFuture.discard(channel)
+                throw error
+            }
+            switch result {
+            case .websocket(let websocketChannel):
+                guard let typed = websocketChannel as? NIOAsyncChannel<Inbound, Outbound> else {
+                    CancellableFuture.discard(websocketChannel)
+                    throw Errors.websocketUpgradeFailed
+                }
+                return typed
+            case .notUpgraded:
+                CancellableFuture.discard(channel)
+                throw Errors.websocketUpgradeFailed
+            }
+        }
         
         @Sendable func upgradeSocket(_ channel: Channel, server: ServerLocation
         ) -> EventLoopFuture<EventLoopFuture<ConnectionManager<Inbound, Outbound>.UpgradeResult>> {
@@ -857,13 +931,6 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                 try addClientTLSHandlerIfNeeded(to: channel, server: server, tlsPreKeyed: tlsPreKeyed)
 #endif
                 try channel.pipeline.syncOperations.addHandler(monitor)
-                if webSocketOptions == nil {
-                    webSocketOptions = WebSocketOptions()
-                }
-                guard let webSocketOptions else {
-                    throw Errors.websocketUpgradeFailed
-                }
-                
                 
                 let upgrader = NIOTypedWebSocketClientUpgrader<UpgradeResult>(
                     maxFrameSize: webSocketOptions.maxFrameSize,
@@ -875,7 +942,7 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                                 maxAccumulatedFrameCount: webSocketOptions.maxAccumulatedFrameCount,
                                 maxAccumulatedFrameSize: webSocketOptions.maxAccumulatedFrameSize
                             ))
-                            let asyncChannel = try NIOAsyncChannel<WebSocketFrame, WebSocketFrame>(wrappingChannelSynchronously: channel)
+                            let asyncChannel: NIOAsyncChannel<WebSocketFrame, WebSocketFrame> = try CancellableFuture.wrap(channel)
                             return .websocket(asyncChannel)
                         }
                     }
@@ -932,32 +999,12 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                 if let channelHandlers = delegate?.retrieveChannelHandlers(), !channelHandlers.isEmpty {
                     try channel.pipeline.syncOperations.addHandlers(channelHandlers)
                 }
-                return try NIOAsyncChannel<Inbound, Outbound>(
-                    wrappingChannelSynchronously: channel)
+                return try CancellableFuture.wrap(channel)
             }
         }
     }
     
-    public func connectWebSocket(
-        to servers: [ServerLocation],
-        maxReconnectionAttempts: Int = 6,
-        timeout: TimeAmount = .seconds(10),
-        tlsPreKeyed: TLSPreKeyedConfiguration? = nil,
-        retryStrategy: RetryStrategy = .fixed(delay: .seconds(5))
-    ) async throws {
-        enabledWebsocket = true
-        for await server in servers.async {
-            try await attemptConnection(
-                to: server,
-                currentAttempt: 0,
-                maxAttempts: maxReconnectionAttempts,
-                timeout: timeout,
-                tlsPreKeyed: tlsPreKeyed,
-                retryStrategy: retryStrategy)
-        }
-    }
-    
-    enum UpgradeResult {
+    enum UpgradeResult: Sendable {
         case websocket(NIOAsyncChannel<WebSocketFrame, WebSocketFrame>)
         case notUpgraded
     }
@@ -968,17 +1015,20 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     ///   - monitor: The `NetworkEventMonitor` instance to monitor events from.
     ///   - server: The `ServerLocation` associated with the connection.
     private func delegateMonitorEvents(monitor: NetworkEventMonitor, server: ServerLocation) async {
+        let id = monitor.connectionIdentifier
         if let errorStream = monitor.errorStream {
-            server.delegate?.handleError(errorStream, id: monitor.connectionIdentifier)
+            server.delegate?.handleError(errorStream, id: id)
         }
-        if let eventStream = monitor.eventStream {
-            await server.delegate?.handleNetworkEvents(eventStream, id: monitor.connectionIdentifier)
+        if let eventStream = monitor.eventStream, let delegate = server.delegate {
+            // Do not await: a delegate that iterates the stream inline must not
+            // block `connect(to:)` from returning or the connection service from starting.
+            Task { await delegate.handleNetworkEvents(eventStream, id: id) }
         }
         if let channelActiveStream = monitor.channelActiveStream {
-            server.contextDelegate?.channelActive(channelActiveStream, id: monitor.connectionIdentifier)
+            server.contextDelegate?.channelActive(channelActiveStream, id: id)
         }
         if let channelInactiveStream = monitor.channelInactiveStream {
-            server.contextDelegate?.channelInactive(channelInactiveStream, id: monitor.connectionIdentifier)
+            server.contextDelegate?.channelInactive(channelInactiveStream, id: id)
         }
     }
 
@@ -1096,7 +1146,9 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     ///   - tlsPreKeyed: Optional pre-configured TLS settings to use for all connections.
     ///   - maxConcurrentConnections: Maximum number of concurrent connection attempts. Default is 4.
     ///
-    /// - Throws: An error if all connection attempts fail after the maximum number of retries.
+    /// - Throws: The first error encountered, after every server has been attempted. Servers that
+    ///   succeeded stay connected. `ConnectionManagerMetricsDelegate.parallelConnectionDidComplete`
+    ///   is always reported before the error is rethrown.
     ///
     /// ## Example
     /// ```swift
@@ -1121,64 +1173,13 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         maxConcurrentConnections: Int = 4
     ) async throws {
         // Use default retry strategy for backward compatibility
-        let retryStrategy: RetryStrategy = .fixed(delay: .seconds(5))
-        
-        let totalAttempted = servers.count
-        var successful = 0
-        var failed = 0
-        
-        try await withThrowingTaskGroup(of: (success: Bool, error: Error?).self) { group in
-            var activeConnections = 0
-            var serverIndex = 0
-            
-            while serverIndex < servers.count || activeConnections > 0 {
-                // Start new connections up to the concurrency limit
-                while activeConnections < maxConcurrentConnections && serverIndex < servers.count {
-                    let server = servers[serverIndex]
-                    serverIndex += 1
-                    activeConnections += 1
-                    
-                    group.addTask { [weak self] in
-                        guard let self else { return (success: false, error: nil) }
-                        do {
-                            try await self.attemptConnection(
-                                to: server,
-                                currentAttempt: 0,
-                                maxAttempts: maxReconnectionAttempts,
-                                timeout: timeout,
-                                tlsPreKeyed: tlsPreKeyed,
-                                retryStrategy: retryStrategy)
-                            return (success: true, error: nil)
-                        } catch {
-                            return (success: false, error: error)
-                        }
-                    }
-                }
-                
-                // Wait for at least one connection to complete
-                if activeConnections > 0 {
-                    let result = try await group.next()
-                    if let error = result?.error {
-                        failed += 1
-                        throw error
-                    } else if result?.success == true {
-                        successful += 1
-                    } else {
-                        failed += 1
-                    }
-                    activeConnections -= 1
-                }
-            }
-        }
-        
-        // Notify delegate of parallel connection completion
-        metricsDelegate?.parallelConnectionDidComplete(
-            totalAttempted: totalAttempted,
-            successful: successful,
-            failed: failed
-        )
-        
-        // Connections are managed individually through the connection cache
+        try await connectParallel(
+            to: servers,
+            maxReconnectionAttempts: maxReconnectionAttempts,
+            timeout: timeout,
+            tlsPreKeyed: tlsPreKeyed,
+            retryStrategy: .fixed(delay: .seconds(5)),
+            maxConcurrentConnections: maxConcurrentConnections)
     }
     
     /// Connects to a list of server locations with parallel processing and advanced configuration.
@@ -1193,7 +1194,9 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
     ///   - retryStrategy: The retry strategy to use for failed connections.
     ///   - maxConcurrentConnections: Maximum number of concurrent connection attempts. Default is 4.
     ///
-    /// - Throws: An error if all connection attempts fail after the maximum number of retries.
+    /// - Throws: The first error encountered, after every server has been attempted. Servers that
+    ///   succeeded stay connected. `ConnectionManagerMetricsDelegate.parallelConnectionDidComplete`
+    ///   is always reported before the error is rethrown.
     public func connectParallel(
         to servers: [ServerLocation],
         maxReconnectionAttempts: Int = 6,
@@ -1202,7 +1205,13 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
         retryStrategy: RetryStrategy,
         maxConcurrentConnections: Int = 4
     ) async throws {
-        try await withThrowingTaskGroup(of: Void.self) { group in
+        _shouldReconnect = true
+        let totalAttempted = servers.count
+        var successful = 0
+        var failed = 0
+        var firstError: (any Error)?
+        
+        await withTaskGroup(of: Result<Void, any Error>.self) { group in
             var activeConnections = 0
             var serverIndex = 0
             
@@ -1214,25 +1223,88 @@ public actor ConnectionManager<Inbound: Sendable, Outbound: Sendable> {
                     activeConnections += 1
                     
                     group.addTask { [weak self] in
-                        guard let self else { return }
-                        try await self.attemptConnection(
-                            to: server,
-                            currentAttempt: 0,
-                            maxAttempts: maxReconnectionAttempts,
-                            timeout: timeout,
-                            tlsPreKeyed: tlsPreKeyed,
-                            retryStrategy: retryStrategy)
+                        guard let self else { return .failure(CancellationError()) }
+                        do {
+                            try await self.attemptConnection(
+                                to: server,
+                                currentAttempt: 0,
+                                maxAttempts: maxReconnectionAttempts,
+                                timeout: timeout,
+                                tlsPreKeyed: tlsPreKeyed,
+                                retryStrategy: retryStrategy)
+                            return .success(())
+                        } catch {
+                            return .failure(error)
+                        }
                     }
                 }
                 
-                // Wait for at least one connection to complete
-                if activeConnections > 0 {
-                    try await group.next()
+                // Wait for at least one connection to complete. Every server is
+                // attempted so the summary below is accurate; the first error is
+                // rethrown after the group drains.
+                if activeConnections > 0, let result = await group.next() {
+                    switch result {
+                    case .success:
+                        successful += 1
+                    case .failure(let error):
+                        failed += 1
+                        if firstError == nil { firstError = error }
+                    }
                     activeConnections -= 1
                 }
             }
         }
         
+        metricsDelegate?.parallelConnectionDidComplete(
+            totalAttempted: totalAttempted,
+            successful: successful,
+            failed: failed
+        )
+        
+        if let firstError {
+            throw firstError
+        }
         // Connections are managed individually through the connection cache
+    }
+}
+
+// MARK: - WebSocket
+
+extension ConnectionManager where Inbound == WebSocketFrame, Outbound == WebSocketFrame {
+    /// Connects to a list of server locations over WebSocket.
+    ///
+    /// Each connection performs an HTTP/1.1 upgrade using `webSocketOptions` (URI, headers,
+    /// subprotocols, frame limits). The resulting channels carry `WebSocketFrame`s, which is why
+    /// this method is only available on `ConnectionManager<WebSocketFrame, WebSocketFrame>`.
+    ///
+    /// The WebSocket transport applies to this call only: a later plain `connect(to:)` on the
+    /// same manager establishes raw TCP channels.
+    ///
+    /// - Parameters:
+    ///   - servers: An array of `ServerLocation` instances to connect to.
+    ///   - maxReconnectionAttempts: The maximum number of attempts for the initial connection to each server. Default is 6.
+    ///   - timeout: The timeout duration for each connection attempt. Default is 10 seconds.
+    ///   - tlsPreKeyed: Optional pre-configured TLS settings to use for all connections.
+    ///   - retryStrategy: The retry strategy to use between failed attempts.
+    ///
+    /// - Throws: An error if a server cannot be reached or upgraded after `maxReconnectionAttempts`.
+    public func connectWebSocket(
+        to servers: [ServerLocation],
+        maxReconnectionAttempts: Int = 6,
+        timeout: TimeAmount = .seconds(10),
+        tlsPreKeyed: TLSPreKeyedConfiguration? = nil,
+        retryStrategy: RetryStrategy = .fixed(delay: .seconds(5))
+    ) async throws {
+        _shouldReconnect = true
+        for server in servers {
+            try await attemptConnection(
+                to: server,
+                currentAttempt: 0,
+                maxAttempts: maxReconnectionAttempts,
+                timeout: timeout,
+                tlsPreKeyed: tlsPreKeyed,
+                retryStrategy: retryStrategy,
+                transport: .webSocket)
+        }
     }
 }

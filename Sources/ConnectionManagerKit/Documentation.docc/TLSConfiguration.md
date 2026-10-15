@@ -349,16 +349,18 @@ class MyConnectionDelegate: ConnectionDelegate {
 
 ```swift
 func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>, id: String) async {
-    for await event in stream {
-        switch event {
-        case .viabilityChanged(let update):
-            if update.isViable {
-                print("TLS connection is viable")
-            } else {
-                print("TLS connection is not viable")
+    Task {
+        for await event in stream {
+            switch event {
+            case .viabilityChanged(let update):
+                if update.isViable {
+                    print("TLS connection is viable")
+                } else {
+                    print("TLS connection is not viable")
+                }
+            default:
+                break
             }
-        default:
-            break
         }
     }
 }

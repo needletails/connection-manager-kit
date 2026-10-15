@@ -89,20 +89,11 @@ struct ConnectionManagerKitTests {
         
         // Create real client connections to test the limit
         let clientGroup = MultiThreadedEventLoopGroup.singleton
-        let clientConnections = (1...maxConnections).map { i in
+        let clientConnections = (1...maxConnections).map { _ in
             Task {
-                let bootstrap = ClientBootstrap(group: clientGroup)
-                    .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-                    .channelInitializer { channel in
-                        channel.eventLoop.makeCompletedFuture {
-                            try channel.pipeline.syncOperations.addHandler(
-                                ByteToMessageHandler(
-                                    LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes),
-                                    maximumBufferSize: 16_777_216))
-                        }
-                    }
-                
-                return try await bootstrap.connect(host: "localhost", port: 6680).get()
+                try await connectRaw(
+                    host: "localhost", port: 6680, group: clientGroup,
+                    handlers: lengthFieldClientHandlers)
             }
         }
         
@@ -115,18 +106,9 @@ struct ConnectionManagerKitTests {
         
         // Try to establish one more connection - it should be rejected or limited
         let extraConnection = Task {
-            let bootstrap = ClientBootstrap(group: clientGroup)
-                .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-                .channelInitializer { channel in
-                    channel.eventLoop.makeCompletedFuture {
-                        try channel.pipeline.syncOperations.addHandler(
-                            ByteToMessageHandler(
-                                LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes),
-                                maximumBufferSize: 16_777_216))
-                    }
-                }
-            
-            return try await bootstrap.connect(host: "localhost", port: 6680).get()
+            try await connectRaw(
+                host: "localhost", port: 6680, group: clientGroup,
+                handlers: lengthFieldClientHandlers)
         }
         
         // Wait a bit for the extra connection attempt
@@ -151,6 +133,7 @@ struct ConnectionManagerKitTests {
         try await Task.sleep(for: .milliseconds(200))
     }
     
+    
     @Test("Listener metrics should update on connection accept/close")
     func testListenerMetricsUpdate() async throws {
         let listener = ConnectionListener<ByteBuffer, ByteBuffer>()
@@ -172,18 +155,9 @@ struct ConnectionManagerKitTests {
         // Create a real client connection
         let clientGroup = MultiThreadedEventLoopGroup.singleton
         let clientConnection = Task {
-            let bootstrap = ClientBootstrap(group: clientGroup)
-                .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-                .channelInitializer { channel in
-                    channel.eventLoop.makeCompletedFuture {
-                        try channel.pipeline.syncOperations.addHandler(
-                            ByteToMessageHandler(
-                                LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes),
-                                maximumBufferSize: 16_777_216))
-                    }
-                }
-            
-            return try await bootstrap.connect(host: "localhost", port: 6681).get()
+            try await connectRaw(
+                host: "localhost", port: 6681, group: clientGroup,
+                handlers: lengthFieldClientHandlers)
         }
         
         // Wait for connection to be established
@@ -228,18 +202,8 @@ struct ConnectionManagerKitTests {
         try await Task.sleep(until: .now + .seconds(1))
         
         // Create a real client connection
-        let clientGroup = MultiThreadedEventLoopGroup.singleton
-        let bootstrap = ClientBootstrap(group: clientGroup)
-            .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-            .channelInitializer { channel in
-                channel.eventLoop.makeCompletedFuture {
-                    try channel.pipeline.syncOperations.addHandler(
-                        ByteToMessageHandler(
-                            LengthFieldBasedFrameDecoder(lengthFieldBitLength: .threeBytes),
-                            maximumBufferSize: 16_777_216))
-                }
-            }
-        let clientChannel = try await bootstrap.connect(host: "localhost", port: 6682).get()
+        let clientChannel = try await connectRaw(
+            host: "localhost", port: 6682, handlers: lengthFieldClientHandlers)
         
         // Wait for connection to be established
         try await Task.sleep(until: .now + .milliseconds(500))

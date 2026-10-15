@@ -110,12 +110,16 @@ class MyConnectionDelegate: ConnectionDelegate {
     }
     
     func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>, id: String) async {
-        for await event in stream {
-            switch event {
-            case .viabilityChanged(let update):
-                print("Network viability: \(update.isViable)")
-            default:
-                break
+        // The manager awaits this method before the connection starts, so consume
+        // the stream on a task and return. The stream finishes when the channel closes.
+        Task {
+            for await event in stream {
+                switch event {
+                case .viabilityChanged(let update):
+                    print("Network viability: \(update.isViable)")
+                default:
+                    break
+                }
             }
         }
     }
@@ -272,8 +276,10 @@ class MyConnectionDelegate: ConnectionDelegate {
     }
     
     func handleNetworkEvents(_ stream: AsyncStream<NetworkEventMonitor.NetworkEvent>, id: String) async {
-        for await event in stream {
-            print("Network event: \(event)")
+        Task {
+            for await event in stream {
+                print("Network event: \(event)")
+            }
         }
     }
     

@@ -1,15 +1,17 @@
 # ``ConnectionManagerKit``
 
-A modern, cross-platform networking framework built on SwiftNIO for managing network connections with automatic reconnection, TLS support, and comprehensive event monitoring.
+A modern, cross-platform networking framework built on SwiftNIO for managing network connections with retried connection establishment, TLS support, and comprehensive event monitoring.
 
 ## Overview
 
-ConnectionManagerKit provides a high-level interface for managing network connections in Swift applications. It's designed to work seamlessly across Apple platforms (iOS, macOS, tvOS, watchOS) and Linux, offering automatic connection management, TLS support, and robust error handling.
+ConnectionManagerKit provides a high-level interface for managing network connections in Swift applications. It's designed to work seamlessly across Apple platforms (iOS, macOS, tvOS, watchOS) and Linux, offering connection caching, TLS support, and robust error handling.
+
+Retry settings (`maxReconnectionAttempts`, `retryStrategy`) apply to establishing a connection. When an established connection later closes, the manager evicts it and notifies `ChannelContextDelegate.didShutdownChildChannel()`; reconnecting is the adopter's decision, made from that event.
 
 ## Key Features
 
 - **Cross-Platform Support**: Works on Apple platforms using Network framework and Linux using NIO
-- **Automatic Reconnection**: Built-in retry logic with configurable attempts and backoff
+- **Connect Retries**: Built-in retry logic with configurable attempts and backoff for establishing each connection
 - **Advanced Retry Strategies**: Fixed delay, exponential backoff with jitter, and custom retry policies
 - **Parallel Connection Establishment**: Concurrent connection setup for improved performance
 - **Bounded Connection Caching**: Keyed reuse with FIFO/LRU eviction and TTL support

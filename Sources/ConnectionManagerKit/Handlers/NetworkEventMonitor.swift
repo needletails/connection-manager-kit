@@ -433,6 +433,24 @@ public final class NetworkEventMonitor: ChannelInboundHandler, @unchecked Sendab
         }
     }
 
+    /// Called when the handler leaves the pipeline, which for a closed channel is
+    /// the last event it sees. Finishes every stream so consumers' `for await`
+    /// loops return instead of waiting forever on a connection that no longer
+    /// exists. Buffered values (including the final `channelInactive`) are still
+    /// delivered before the streams end.
+    public func handlerRemoved(context: ChannelHandlerContext) {
+        lock.withLock {
+            errorContinuation?.finish()
+            errorContinuation = nil
+            eventContinuation?.finish()
+            eventContinuation = nil
+            channelActiveContinuation?.finish()
+            channelActiveContinuation = nil
+            channelInactiveContinuation?.finish()
+            channelInactiveContinuation = nil
+        }
+    }
+
 #if canImport(Network)
     /// Bridges pipeline errors to `NWError` for the error stream.
     private static func nwError(from error: Error) -> NWError? {
