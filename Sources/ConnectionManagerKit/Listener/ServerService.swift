@@ -135,6 +135,12 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
     private var contextDelegates: [String: ChannelContextDelegate] = [:]
     private var channelContexts = [ChannelContext<Inbound, Outbound>]()
     private var outboundContinuations: [String: AsyncStream<NIOAsyncChannelOutboundWriter<Outbound>>.Continuation] = [:]
+    /// Child channels the listener itself closed (`shutdownChildChannel` / `shutdown`).
+    /// Their run loops end after the context delegate is gone, usually with
+    /// `NIOSSLError.uncleanShutdown` when the peer answers our close_notify with a bare
+    /// FIN; those errors are a consequence of the close, not a failure, and are logged
+    /// at debug. An id is kept until that channel's run loop has returned.
+    private var intentionalCloses: Set<String> = []
     private weak var listenerDelegate: ListenerDelegate?
     nonisolated(unsafe) private weak var serviceListenerDelegate: ServiceListenerDelegate?
 
@@ -465,14 +471,66 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
                 childChannel: childChannel,
                 channelId: channelId
             )
-            
+
         } catch {
-            logger.log(level: .error, message: "Child channel \(channelId) failed: \(error)")
+            if didCloseIntentionally(id: channelId) {
+                logger.log(
+                    level: Self.isExpectedAfterIntentionalClose(error) ? .debug : .warning,
+                    message: "Child channel \(channelId) ended after listener-initiated close: \(error)")
+            } else {
+                logger.log(level: .error, message: "Child channel \(channelId) failed: \(error)")
+            }
         }
-        
+
         decrementActiveConnections()
         removeChildChannelState(id: channelId)
+        intentionalCloses.remove(channelId)
         await delegate.childChannelDidClose(id: channelId)
+    }
+
+    /// Errors a child run loop raises because *we* closed the socket: the peer's TCP
+    /// FIN/RST arriving before (or instead of) its TLS close_notify, writes against the
+    /// closed channel, or the TLS shutdown timing out.
+    nonisolated static func isExpectedAfterIntentionalClose(_ error: any Error) -> Bool {
+        if let sslError = error as? NIOSSLError {
+            switch sslError {
+            case .uncleanShutdown:
+                return true
+            default:
+                return false
+            }
+        }
+        if error is NIOSSLCloseTimedOutError {
+            return true
+        }
+        if let channelError = error as? ChannelError {
+            switch channelError {
+            case .ioOnClosedChannel, .alreadyClosed, .inputClosed, .outputClosed, .eof:
+                return true
+            default:
+                return false
+            }
+        }
+        if let ioError = error as? IOError {
+            switch ioError.errnoCode {
+            case ECONNRESET, EPIPE, ENOTCONN, EBADF:
+                return true
+            default:
+                return false
+            }
+        }
+        return false
+    }
+
+    private func markIntentionalClose(id: String) {
+        // Only a live channel can still produce a run-loop error; an id whose loop has
+        // already returned must not be remembered forever.
+        guard channelContexts.contains(where: { $0.id == id }) else { return }
+        intentionalCloses.insert(id)
+    }
+
+    func didCloseIntentionally(id: String) -> Bool {
+        intentionalCloses.contains(id)
     }
     
     /// A WebSocket handshake failed before a child channel existed; release the
@@ -526,6 +584,7 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
     }
     
     func shutdownChildChannel(id: String) async {
+        markIntentionalClose(id: id)
         await self.stopTLS(from: id)
         if let context = channelContexts.first(where: { $0.id == id }) {
             context.channel.channel.close(promise: nil)
@@ -540,15 +599,19 @@ actor ServerService<Inbound: Sendable, Outbound: Sendable>: Service, WebSocketUp
         self.contextDelegates.removeValue(forKey: id)
     }
 
+    /// A delegate that was removed by `shutdownChildChannel` is expected to be missing
+    /// for whatever the run loop still produces; only an unexplained absence is an error.
     private func noteMissingContextDelegateDrop(channelId: String, path: String) {
-        logger.log(level: .error, message: "No context delegate for child channel; dropping \(path)", metadata: [
+        let level: Level = didCloseIntentionally(id: channelId) ? .debug : .error
+        logger.log(level: level, message: "No context delegate for child channel; dropping \(path)", metadata: [
             "channelId": "\(channelId)"
         ])
     }
-    
+
     func shutdown() async throws {
         let contexts = channelContexts
         for context in contexts {
+            markIntentionalClose(id: context.id)
             await stopTLS(from: context.id)
             context.channel.channel.close(promise: nil)
         }
